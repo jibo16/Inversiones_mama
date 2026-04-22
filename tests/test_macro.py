@@ -123,10 +123,14 @@ def test_load_macro_panel_all_fetches_fail(monkeypatch, tmp_path):
 
 
 def test_canonical_series_keys_are_stable():
+    # sp500 intentionally excluded: FRED's SP500 series only goes back to
+    # 2015, which collapsed the CCAR regression window post-NaN-drop to
+    # post-2015 and excluded the 2008 crisis. It's also a near-dual of the
+    # Mkt-RF factor (data leakage). See data/macro.py for the full note.
     expected = {
         "real_gdp", "unemployment", "cpi",
         "treasury_3m", "treasury_10y", "baa_10y_spread",
-        "vix", "home_price_index", "sp500", "dxy",
+        "vix", "home_price_index", "dxy",
     }
     assert set(FRED_MACRO_SERIES) == expected
 

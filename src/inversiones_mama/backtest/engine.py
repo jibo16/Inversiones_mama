@@ -37,6 +37,8 @@ from ..config import (
     KELLY_FRACTION,
     LOOKBACK_DAYS,
     MAX_WEIGHT_PER_NAME,
+    MAX_WEIGHT_PER_SECTOR,
+    MU_SHRINKAGE,
     RCK_MAX_DRAWDOWN_PROBABILITY,
     RCK_MAX_DRAWDOWN_THRESHOLD,
 )
@@ -69,8 +71,10 @@ class BacktestConfig:
     lookback_days: int = LOOKBACK_DAYS
     kelly_fraction: float = KELLY_FRACTION
     per_name_cap: float = MAX_WEIGHT_PER_NAME
+    per_sector_cap: float = MAX_WEIGHT_PER_SECTOR  # 1.0 = disable; 0.30 = institutional default
     rck_alpha: float = RCK_MAX_DRAWDOWN_THRESHOLD
     rck_beta: float = RCK_MAX_DRAWDOWN_PROBABILITY
+    mu_shrinkage: float = MU_SHRINKAGE  # 0.0 = legacy, 0.5 = default cross-sectional shrinkage
     # Covariance estimator: "sample" (v1a default) or "lw_diagonal" / "lw_constant_correlation"
     # for larger universes where sample cov is ill-conditioned (Markowitz's curse).
     covariance_method: str = "sample"
@@ -232,6 +236,19 @@ def walk_forward_backtest(
     # Rebalance schedule: last trading day of each period, skipping warmup
     rebal_set = _rebalance_schedule(returns.index, config.rebalance_freq, config.lookback_days)
 
+    # Build the sector map once at backtest start. Passed to every RCK
+    # solve so the per-sector cap applies. Failing gracefully leaves the
+    # sector constraint off rather than blocking the backtest.
+    sector_map: dict[str, str] | None = None
+    if config.per_sector_cap < 1.0:
+        try:
+            from ..data.sectors import build_sector_map  # lazy
+
+            sector_map = build_sector_map(tickers)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("sector map build failed (%s); sector cap disabled.", exc)
+            sector_map = None
+
     # Fetch ADV once at backtest start so every rebalance uses the same
     # reference volume. Failing gracefully keeps the engine usable offline.
     adv_series: pd.Series | None = None
@@ -286,6 +303,8 @@ def walk_forward_backtest(
                 premia = factor_premia(train_factors, lookback_days=lb)
                 stage = "mu"
                 mu = compute_composite_mu(loadings, premia).reindex(tickers).fillna(0.0)
+                if config.mu_shrinkage > 0.0:
+                    mu = (1.0 - config.mu_shrinkage) * mu + config.mu_shrinkage * float(mu.mean())
                 stage = "covariance"
                 Sigma = estimate_covariance(
                     train_returns, method=config.covariance_method
@@ -298,6 +317,8 @@ def walk_forward_backtest(
                     cap=config.per_name_cap,
                     alpha=config.rck_alpha,
                     beta=config.rck_beta,
+                    sector_map=sector_map,
+                    sector_cap=config.per_sector_cap,
                 )
             except Exception as exc:  # noqa: BLE001 - we want to continue on any solver failure
                 log.warning("RCK fit/solve failed at %s in stage=%s: %s; holding current weights.",

@@ -49,9 +49,31 @@ MAX_WEIGHT_PER_NAME: float = 0.15        # per-name cap — lowered from 0.35 on
                                          # (SP100/SP500/+ETFs) actually exercise
                                          # diversification rather than collapsing
                                          # to the top 3 by in-sample Sharpe.
+MAX_WEIGHT_PER_SECTOR: float = 0.30      # per-sector cap (2026-04-22, Jorge).
+                                         # Institutional guardrail: without it,
+                                         # RCK on SP500 stacks 7 picks entirely
+                                         # in semis/hardware because the top
+                                         # in-sample alphas cluster within a
+                                         # single sector during a tech bull.
+                                         # With per-name 0.15 + per-sector 0.30,
+                                         # no single sector can exceed 30% of
+                                         # the book, forcing true statistical-
+                                         # arbitrage-style cross-sector spread.
 REBALANCE_FREQ: str = "monthly"          # "monthly" | "quarterly"
 LOOKBACK_DAYS: int = 252                 # ~1 year rolling window for mu/Sigma
 MIN_HISTORY_DAYS: int = 60               # drop assets with less than 60 obs
+
+# --- Cross-sectional mu shrinkage (2026-04-22, Jorge) -----------------------
+# In-sample factor-regression alphas are notoriously over-fit, especially on
+# wide universes (SP500). Without shrinkage the RCK solver stacks the top
+# 5-10 highest-alpha names at the per-name cap, producing a single-cluster
+# corner solution. We apply cross-sectional James-Stein-style shrinkage of
+# mu toward its mean BEFORE feeding it to RCK:
+#     mu_shrunk = (1 - MU_SHRINKAGE) * mu + MU_SHRINKAGE * mean(mu)
+# 0.5 = treat half the alpha as noise. Set to 0.0 to disable (legacy
+# behavior). Set higher (e.g. 0.7) for very wide universes where you want
+# to lean even harder on the systematic factor premia component.
+MU_SHRINKAGE: float = 0.5
 
 # RCK risk-budget dials (feed into lambda = log(beta) / log(alpha))
 RCK_MAX_DRAWDOWN_THRESHOLD: float = 0.50  # alpha: tolerate at most 50% DD

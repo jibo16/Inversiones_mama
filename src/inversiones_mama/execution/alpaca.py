@@ -298,7 +298,14 @@ class AlpacaClient:
 
     def _parse_response(self, resp: requests.Response, url: str):
         if resp.status_code == 401 or resp.status_code == 403:
-            raise AlpacaAuthError(f"Alpaca auth rejected at {url}: HTTP {resp.status_code}")
+            # Include response body so 403s from non-auth reasons (blocked
+            # asset, trading halted, wash-trade rejection, insufficient buying
+            # power on a short, etc.) surface the actual cause. Alpaca returns
+            # a JSON body with {"code": ..., "message": ...} on most 403s.
+            raise AlpacaAuthError(
+                f"Alpaca auth rejected at {url}: HTTP {resp.status_code} "
+                f"body={resp.text[:400]!r}"
+            )
         try:
             resp.raise_for_status()
         except requests.HTTPError as exc:

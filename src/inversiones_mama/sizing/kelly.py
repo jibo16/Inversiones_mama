@@ -155,6 +155,8 @@ def solve_rck(
     min_weight: float = 0.0,
     solver: str | None = None,
     verbose: bool = False,
+    sector_map: dict[str, str] | None = None,
+    sector_cap: float = 1.0,
 ) -> KellyResult:
     """Solve the Risk-Constrained Kelly optimization.
 
@@ -273,6 +275,25 @@ def solve_rck(
         w <= cap,             # per-name cap
         cp.sum(w) <= 1.0,    # no leverage (long-only, remainder = cash)
     ]
+
+    # --- Sector cap constraints ---------------------------------------------
+    # When a ``sector_map`` is provided with ``sector_cap`` < 1, constrain
+    # the total weight in each sector. Prevents the top-alpha cluster from
+    # monopolising the book (observed on SP500 without this: 7 semis/hardware
+    # names at the per-name cap formed the entire portfolio).
+    if sector_map is not None and sector_cap < 1.0:
+        positive_tickers = [tickers[i] for i in range(n) if positive_mask[i]]
+        sector_to_indices: dict[str, list[int]] = {}
+        for pos_idx, tick in enumerate(positive_tickers):
+            sector = sector_map.get(tick)
+            if sector is None:
+                continue
+            sector_to_indices.setdefault(sector, []).append(pos_idx)
+        for sector_name, idxs in sector_to_indices.items():
+            if len(idxs) >= 2:
+                # Single-ticker sectors already bound by the per-name cap when
+                # sector_cap >= cap; skip redundant constraints.
+                constraints.append(cp.sum(w[idxs]) <= sector_cap)
 
     # --- RCK drawdown probability constraint --------------------------------
     # From Grossman–Zhou: P(DD ≥ α) ≤ β  iff  w'Σw ≤ (2/λ) · w'μ

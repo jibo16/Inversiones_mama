@@ -45,6 +45,8 @@ from ..config import (
     KELLY_FRACTION,
     LOOKBACK_DAYS,
     MAX_WEIGHT_PER_NAME,
+    MAX_WEIGHT_PER_SECTOR,
+    MU_SHRINKAGE,
     RCK_MAX_DRAWDOWN_PROBABILITY,
     RCK_MAX_DRAWDOWN_THRESHOLD,
 )
@@ -218,6 +220,9 @@ class PaperTradingOrchestrator:
         per_name_cap: float = MAX_WEIGHT_PER_NAME,
         rck_alpha: float = RCK_MAX_DRAWDOWN_THRESHOLD,
         rck_beta: float = RCK_MAX_DRAWDOWN_PROBABILITY,
+        mu_shrinkage: float = MU_SHRINKAGE,
+        per_sector_cap: float = MAX_WEIGHT_PER_SECTOR,
+        sector_map: dict[str, str] | None = None,
         max_deploy_capital: float | None = None,
     ) -> None:
         if prices_history.empty:
@@ -237,6 +242,22 @@ class PaperTradingOrchestrator:
         self.per_name_cap = float(per_name_cap)
         self.rck_alpha = float(rck_alpha)
         self.rck_beta = float(rck_beta)
+        self.mu_shrinkage = float(mu_shrinkage)
+        self.per_sector_cap = float(per_sector_cap)
+        # Build the sector map once at construction so each rebalance cycle
+        # reuses it. If the caller passed one explicitly, honor it.
+        if sector_map is not None:
+            self.sector_map: dict[str, str] | None = dict(sector_map)
+        elif self.per_sector_cap < 1.0:
+            try:
+                from ..data.sectors import build_sector_map  # lazy
+
+                self.sector_map = build_sector_map(list(prices_history.columns))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("sector map build failed (%s); sector cap disabled.", exc)
+                self.sector_map = None
+        else:
+            self.sector_map = None
         # Optional deployment cap — when set, target weights are applied
         # only to min(portfolio_value, max_deploy_capital). Useful when the
         # broker seeds a paper account with more cash than the strategy's
@@ -260,6 +281,8 @@ class PaperTradingOrchestrator:
         loadings = fit_factor_loadings(train_returns, train_factors)
         premia = factor_premia(train_factors, lookback_days=self.lookback_days)
         mu = compute_composite_mu(loadings, premia).reindex(tickers).fillna(0.0)
+        if self.mu_shrinkage > 0.0:
+            mu = (1.0 - self.mu_shrinkage) * mu + self.mu_shrinkage * float(mu.mean())
         Sigma = train_returns.cov().reindex(index=tickers, columns=tickers)
 
         result = solve_rck(
@@ -269,6 +292,8 @@ class PaperTradingOrchestrator:
             cap=self.per_name_cap,
             alpha=self.rck_alpha,
             beta=self.rck_beta,
+            sector_map=self.sector_map,
+            sector_cap=self.per_sector_cap,
         )
         return result.weights.reindex(tickers).fillna(0.0)
 

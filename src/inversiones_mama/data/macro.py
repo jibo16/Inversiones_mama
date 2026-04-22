@@ -33,17 +33,28 @@ log = logging.getLogger(__name__)
 # Canonical FRED series ids for the CCAR Severely Adverse regression.
 # The set is a deliberate subset of the Fed's 28-variable scenario —
 # the ones that map cleanly onto the 6 factors in our model.
+#
+# "sp500" (FRED series id SP500) is INTENTIONALLY EXCLUDED:
+# 1. FRED's public SP500 daily series starts in 2015, which made the
+#    regression window collapse to 38 quarters post-NaN-drop — dropping
+#    the entire 2008 crisis out of the fit. The stress-test betas were
+#    therefore artificially tame.
+# 2. The series is a near-dual of the Mkt-RF factor we're regressing
+#    onto. Keeping it would induce data leakage (trivial self-explanation
+#    of equity returns by contemporaneous equity levels).
+# The CCAR scenario's sp500 path is still used for reporting/display;
+# the regression projects Mkt-RF via unemployment + credit spreads + VIX
+# instead.
 FRED_MACRO_SERIES: dict[str, str] = {
-    "real_gdp":          "GDPC1",        # real GDP (quarterly, $B chained)
-    "unemployment":      "UNRATE",       # civilian unemployment rate (monthly, %)
-    "cpi":               "CPIAUCSL",     # CPI-U all urban consumers (monthly, index)
-    "treasury_3m":       "DGS3MO",       # 3-month Treasury constant maturity (daily, %)
-    "treasury_10y":      "DGS10",        # 10-year Treasury constant maturity (daily, %)
-    "baa_10y_spread":    "BAA10Y",       # Moody's BAA minus 10y Treasury (daily, %)
-    "vix":               "VIXCLS",       # CBOE volatility index (daily)
-    "home_price_index":  "CSUSHPINSA",   # Case-Shiller US national HPI (monthly, index)
-    "sp500":             "SP500",        # S&P 500 close (daily)
-    "dxy":               "DTWEXBGS",     # trade-weighted USD index (daily)
+    "real_gdp":          "GDPC1",        # real GDP (quarterly, $B chained)  since 1947
+    "unemployment":      "UNRATE",       # civilian unemployment (monthly, %) since 1948
+    "cpi":               "CPIAUCSL",     # CPI-U all urban (monthly, index)   since 1947
+    "treasury_3m":       "DGS3MO",       # 3-month Treasury (daily, %)        since 1981
+    "treasury_10y":      "DGS10",        # 10-year Treasury (daily, %)        since 1962
+    "baa_10y_spread":    "BAA10Y",       # Moody's BAA - 10y (daily, %)       since 1986
+    "vix":               "VIXCLS",       # CBOE VIX (daily, level)            since 1990
+    "home_price_index":  "CSUSHPINSA",   # Case-Shiller US HPI (monthly)      since 1987
+    "dxy":               "DTWEXBGS",     # trade-weighted USD (daily, index)  since 2006
 }
 
 
