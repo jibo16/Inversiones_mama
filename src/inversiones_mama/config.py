@@ -40,7 +40,12 @@ BENCHMARK: str = "SPY"
 
 # --- Strategy parameters ----------------------------------------------------
 KELLY_FRACTION: float = 0.65             # 0.65 multiplier (Jorge, 2026-04-21)
-MAX_WEIGHT_PER_NAME: float = 0.35        # per-name cap to prevent blow-up
+MAX_WEIGHT_PER_NAME: float = 0.15        # per-name cap — lowered from 0.35 on
+                                         # 2026-04-22 (Jorge). Forces >=7 active
+                                         # positions so expanded universes
+                                         # (SP100/SP500/+ETFs) actually exercise
+                                         # diversification rather than collapsing
+                                         # to the top 3 by in-sample Sharpe.
 REBALANCE_FREQ: str = "monthly"          # "monthly" | "quarterly"
 LOOKBACK_DAYS: int = 252                 # ~1 year rolling window for mu/Sigma
 MIN_HISTORY_DAYS: int = 60               # drop assets with less than 60 obs

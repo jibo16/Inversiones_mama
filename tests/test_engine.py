@@ -173,8 +173,9 @@ def test_engine_rebalance_records_well_formed(synthetic_prices_and_factors):
         assert set(rec.target_weights.index) == set(prices.columns)
         # Target weights sum to <= 1 (cash is allowed)
         assert rec.target_weights.sum() <= 1.0 + 1e-6
-        # Per-name cap
-        assert (rec.target_weights <= 0.35 + 1e-6).all()
+        # Per-name cap (drive from config, not a magic number)
+        from inversiones_mama.config import MAX_WEIGHT_PER_NAME
+        assert (rec.target_weights <= MAX_WEIGHT_PER_NAME + 1e-6).all()
         # No negative weights (long-only)
         assert (rec.target_weights >= -1e-9).all()
 

@@ -163,7 +163,8 @@ def test_orchestrator_runs_one_rebalance(synthetic_market):
     # Target weights are a Series over the same tickers, non-negative, capped
     assert set(summary.target_weights.index) == set(prices.columns)
     assert (summary.target_weights >= -1e-9).all()
-    assert (summary.target_weights <= 0.35 + 1e-9).all()
+    from inversiones_mama.config import MAX_WEIGHT_PER_NAME
+    assert (summary.target_weights <= MAX_WEIGHT_PER_NAME + 1e-9).all()
     # We placed at least one buy (starting from zero positions -> deploy cash)
     assert summary.order_count >= 1
     # TradeLog logged every order

@@ -338,9 +338,11 @@ class TestTenAssetUniverse:
 
     def test_config_defaults_applied(self, ten_asset_mu, ten_asset_sigma):
         """Default fraction/cap from config are applied when not overridden."""
+        from inversiones_mama.config import KELLY_FRACTION, MAX_WEIGHT_PER_NAME
+
         result = solve_rck(ten_asset_mu, ten_asset_sigma)
-        assert result.fraction == 0.65  # from config
-        assert (result.weights <= 0.35 + 1e-6).all()  # from config
+        assert result.fraction == KELLY_FRACTION  # from config
+        assert (result.weights <= MAX_WEIGHT_PER_NAME + 1e-6).all()  # from config
 
     def test_tighter_drawdown_constraint_more_cash(
         self, ten_asset_mu, ten_asset_sigma
