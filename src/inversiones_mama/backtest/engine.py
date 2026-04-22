@@ -40,6 +40,7 @@ from ..config import (
     RCK_MAX_DRAWDOWN_PROBABILITY,
     RCK_MAX_DRAWDOWN_THRESHOLD,
 )
+from ..models.covariance import estimate_covariance
 from ..models.factor_regression import (
     compute_composite_mu,
     factor_premia,
@@ -70,6 +71,9 @@ class BacktestConfig:
     per_name_cap: float = MAX_WEIGHT_PER_NAME
     rck_alpha: float = RCK_MAX_DRAWDOWN_THRESHOLD
     rck_beta: float = RCK_MAX_DRAWDOWN_PROBABILITY
+    # Covariance estimator: "sample" (v1a default) or "lw_diagonal" / "lw_constant_correlation"
+    # for larger universes where sample cov is ill-conditioned (Markowitz's curse).
+    covariance_method: str = "sample"
     # Restrict the backtest date range (None = use full prices range)
     start: datetime | None = None
     end: datetime | None = None
@@ -241,7 +245,9 @@ def walk_forward_backtest(
                 loadings = fit_factor_loadings(train_returns, train_factors)
                 premia = factor_premia(train_factors, lookback_days=lb)
                 mu = compute_composite_mu(loadings, premia).reindex(tickers).fillna(0.0)
-                Sigma = train_returns.cov().reindex(index=tickers, columns=tickers)
+                Sigma = estimate_covariance(
+                    train_returns, method=config.covariance_method
+                ).reindex(index=tickers, columns=tickers)
 
                 result = solve_rck(
                     mu,
