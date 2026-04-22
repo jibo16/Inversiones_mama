@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inversiones-mama"
+version = "0.1.0"
+description = "High-risk quantitative portfolio for Inversiones_mama ($5k, 1-yr horizon, IBKR, math-rigorous)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Jorge" }]
+dependencies = [
+    "yfinance>=0.2.40",
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "statsmodels>=0.14",
+    "cvxpy>=1.4",
+    "pyarrow>=14",
+    "python-dotenv>=1.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+ibkr = ["ib_insync>=0.9.86"]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+    "mypy>=1.7",
+    "types-requests",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inversiones_mama"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+markers = [
+    "live: test uses live network (yfinance/AV/Finnhub/Ken French); skip with -m 'not live'",
+    "slow: slow tests (backtest, Monte Carlo); skip with -m 'not slow'",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
+ignore = ["E501"]  # long lines OK when meaningful
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+# v1a: start permissive, tighten in v1b
+strict = false
+ignore_missing_imports = true
