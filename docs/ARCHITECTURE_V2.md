@@ -1,5 +1,63 @@
 # Inversiones_mama v2 — Thousand-Stock Equities Architecture
 
+> ## AMENDMENT — 2026-04-22: ZERO-BUDGET DEPLOYMENT PLAN (authoritative)
+>
+> This section **supersedes** the parts of the original mandate below
+> that assumed paid data vendors and a 3,000-stock universe. The
+> corrected scope is:
+>
+> **Phase A — Immediate action:** deploy v1a to IBKR **paper** with
+> full execution instrumentation. The trade log + paper orchestrator
+> are implemented (`execution/trade_log.py`, `execution/paper_trader.py`,
+> `scripts/run_paper_rebalance.py`). Use the `DryRunClient` until Agent 3
+> commits the live IBKR Client Portal adapter; then swap in the real
+> client behind the `ExecutionClient` Protocol.
+>
+> **Phase B — Parallel v2 development on FREE data only:**
+>
+> * **Universe reduction to 50–150 liquid assets** — NOT "thousands".
+>   See `data/liquid_universe.py` (`SP100_CORE`, `NASDAQ100_CORE`,
+>   `LIQUID_ETFS`). Sized to fit the AlphaVantage 25/day and Finnhub
+>   60/min free-tier caps.
+> * **Fake point-in-time fundamentals via delayed-report** — see
+>   `data/delayed_fundamentals.py` (`DelayedFundamentalsLoader`,
+>   `DELAY_90D`). Canonical 90-day release-to-usable lag removes
+>   lookahead bias without paid PIT data. Limitations are documented
+>   in the module (restatements invisible; constituency still needs
+>   a separate PIT source).
+> * **No paid data vendors** until paper trading validates that the
+>   live strategy matches the backtest assumptions.
+>
+> **Explicitly forbidden at this stage:**
+>
+> * Purchasing Sharadar or any PIT data vendor.
+> * Upgrading Finnhub / AlphaVantage tiers.
+> * Expanding the universe beyond the curated 50–150 liquid names.
+> * Finalizing production storage architecture.
+>
+> **Phase C — Deferred:** paid PIT data, API upgrades, universe
+> expansion. These decisions only unblock AFTER 2–4 weeks of
+> continuous paper trading with stable execution and slippage inside
+> the IBKR Tiered cost model baseline.
+>
+> **Phase-level ownership under zero-budget:**
+> Phase 1 (PIT heuristic) and the execution-instrumentation work
+> (Phases A) are Agent 1; Phase 2 (HRP + shrinkage) remains Agent 2;
+> live IBKR wiring is Agent 3. The deeper Phases 3–6 of the original
+> mandate below are **on hold** pending paper-trading results.
+>
+> ## Primary acceptance gate for the zero-budget window
+>
+> Before any paid data is purchased, the following must hold:
+>
+> * Paper trading runs ≥ 2 weeks with no structural failures.
+> * Live slippage distribution matches the IBKR Tiered cost model
+>   baked into `backtest/costs.py` within 20 bps at the 95th percentile.
+> * Fill rate ≥ 95% on a standard rebalance.
+> * No critical bugs in the execution pipeline.
+>
+> ## Original mandate (retained for reference)
+>
 > **Status:** mandate issued 2026-04-22 by Jorge. v1a (10-ETF) is shipped
 > and passes all sanity gates (see `results/v1a_verdict.txt`). v2 is a
 > fundamental scope expansion — NOT a refactor of v1a — targeting
