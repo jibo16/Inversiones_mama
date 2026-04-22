@@ -25,6 +25,50 @@ from inversiones_mama.backtest.costs import (
 
 
 # --------------------------------------------------------------------------- #
+# LOB-walk non-linear impact (Roadmap #1, 2026-04-22)                         #
+# --------------------------------------------------------------------------- #
+
+
+class TestLOBWalkSlippage:
+    """Test the non-linear "walk the book" penalty above 1% of ADV."""
+
+    def test_below_threshold_no_lob_penalty(self):
+        """Order at 0.5% of ADV: only sqrt-impact applies."""
+        # shares=500, price=$100, ADV=100_000 => participation=0.5%
+        s_with_lob = estimate_slippage(500, 100.0, adv=100_000, lob_walk=True)
+        s_without = estimate_slippage(500, 100.0, adv=100_000, lob_walk=False)
+        assert s_with_lob == pytest.approx(s_without, rel=1e-9)
+
+    def test_above_threshold_adds_penalty(self):
+        """Order at 5% of ADV: LOB penalty kicks in."""
+        # shares=5000, price=$100, ADV=100_000 => participation=5%
+        s_lob = estimate_slippage(5000, 100.0, adv=100_000, lob_walk=True)
+        s_sqrt_only = estimate_slippage(5000, 100.0, adv=100_000, lob_walk=False)
+        assert s_lob > s_sqrt_only
+
+    def test_penalty_grows_quadratically(self):
+        """Doubling participation above threshold should more-than-double extra penalty."""
+        base_no_lob_10 = estimate_slippage(2000, 100.0, adv=100_000, lob_walk=False)
+        with_lob_10 = estimate_slippage(2000, 100.0, adv=100_000, lob_walk=True)
+        extra_10 = with_lob_10 - base_no_lob_10
+
+        base_no_lob_20 = estimate_slippage(4000, 100.0, adv=100_000, lob_walk=False)
+        with_lob_20 = estimate_slippage(4000, 100.0, adv=100_000, lob_walk=True)
+        extra_20 = with_lob_20 - base_no_lob_20
+
+        # participation 2% -> overshoot = 1 unit.  penalty ~ 10 bps
+        # participation 4% -> overshoot = 3 units. penalty ~ 90 bps
+        # ratio of penalties should be well above 2 (quadratic growth)
+        assert extra_20 / max(extra_10, 1e-9) > 3.0
+
+    def test_no_adv_disables_lob_penalty(self):
+        """When ADV is None, LOB penalty cannot be computed — base bps only."""
+        s_no_adv = estimate_slippage(1_000_000, 100.0, adv=None, lob_walk=True)
+        # base 5 bps of $100M = $50k
+        assert s_no_adv == pytest.approx(1_000_000 * 100.0 * 5 / 10_000, rel=1e-6)
+
+
+# --------------------------------------------------------------------------- #
 # ibkr_commission                                                             #
 # --------------------------------------------------------------------------- #
 

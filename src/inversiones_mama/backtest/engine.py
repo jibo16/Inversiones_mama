@@ -79,6 +79,11 @@ class BacktestConfig:
     end: datetime | None = None
     # Apply transaction costs? (set False for a zero-cost accounting sanity test)
     apply_costs: bool = True
+    # ADV-aware slippage (Roadmap #1): when True the engine fetches 30-day
+    # ADV via yfinance at start, passes it to portfolio_rebalance_cost so
+    # the sqrt-impact + LOB-walk terms in estimate_slippage activate.
+    # Set False to fall back to the flat-5bps behavior.
+    use_adv_slippage: bool = True
 
 
 @dataclass(frozen=True)
@@ -227,6 +232,20 @@ def walk_forward_backtest(
     # Rebalance schedule: last trading day of each period, skipping warmup
     rebal_set = _rebalance_schedule(returns.index, config.rebalance_freq, config.lookback_days)
 
+    # Fetch ADV once at backtest start so every rebalance uses the same
+    # reference volume. Failing gracefully keeps the engine usable offline.
+    adv_series: pd.Series | None = None
+    if config.apply_costs and config.use_adv_slippage:
+        try:
+            from ..data.volume import load_adv_shares  # lazy
+
+            adv_end = returns.index[-1].to_pydatetime()
+            adv_map = load_adv_shares(tickers, end=adv_end, window_days=30, use_cache=True)
+            adv_series = pd.Series(adv_map, dtype=float)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ADV load failed (%s); falling back to flat slippage.", exc)
+            adv_series = None
+
     # State: dollar holdings per asset + cash
     weights_dollar = np.zeros(n)
     cash = float(config.initial_capital)
@@ -307,6 +326,7 @@ def walk_forward_backtest(
                     target_weights=target_w,
                     portfolio_value=wealth,
                     prices=prices_al.loc[date],
+                    adv=adv_series,
                 )
                 wealth -= cost.total_cost
             else:

@@ -221,9 +221,9 @@ def _evaluate_gates(
     gates.append(
         GateVerdict(
             name="annualized_turnover_cost",
-            observed=engine_result.annualized_turnover_cost,
+            observed=float(engine_result.annualized_turnover_cost),
             threshold=GATES.max_annual_turnover_cost,
-            passed=engine_result.annualized_turnover_cost < GATES.max_annual_turnover_cost,
+            passed=bool(engine_result.annualized_turnover_cost < GATES.max_annual_turnover_cost),
             description="Commissions + slippage per year stay under 1.5% of capital",
             comparator="<",
         )
@@ -234,9 +234,9 @@ def _evaluate_gates(
     gates.append(
         GateVerdict(
             name="oos_sharpe_positive",
-            observed=oos_sharpe,
+            observed=float(oos_sharpe),
             threshold=GATES.min_oos_sharpe,
-            passed=oos_sharpe > GATES.min_oos_sharpe,
+            passed=bool(oos_sharpe > GATES.min_oos_sharpe),
             description="Out-of-sample Sharpe ratio is strictly positive",
             comparator=">",
         )
@@ -247,9 +247,9 @@ def _evaluate_gates(
         gates.append(
             GateVerdict(
                 name="mc_prob_loss_40pct",
-                observed=mc_result.prob_loss_40pct,
+                observed=float(mc_result.prob_loss_40pct),
                 threshold=GATES.max_prob_loss_40pct,
-                passed=mc_result.prob_loss_40pct < GATES.max_prob_loss_40pct,
+                passed=bool(mc_result.prob_loss_40pct < GATES.max_prob_loss_40pct),
                 description="P(end-of-year wealth < $3,000 i.e. 40% loss) under 30%",
                 comparator="<",
             )
@@ -257,9 +257,9 @@ def _evaluate_gates(
         gates.append(
             GateVerdict(
                 name="mc_prob_loss_60pct",
-                observed=mc_result.prob_loss_60pct,
+                observed=float(mc_result.prob_loss_60pct),
                 threshold=GATES.max_prob_loss_60pct,
-                passed=mc_result.prob_loss_60pct < GATES.max_prob_loss_60pct,
+                passed=bool(mc_result.prob_loss_60pct < GATES.max_prob_loss_60pct),
                 description="P(end-of-year wealth < $2,000 i.e. 60% loss) under 10%",
                 comparator="<",
             )
@@ -267,9 +267,9 @@ def _evaluate_gates(
         gates.append(
             GateVerdict(
                 name="mc_dd_95th_pct",
-                observed=mc_result.dd_p95,
+                observed=float(mc_result.dd_p95),
                 threshold=GATES.max_dd_95th_pct,
-                passed=mc_result.dd_p95 < GATES.max_dd_95th_pct,
+                passed=bool(mc_result.dd_p95 < GATES.max_dd_95th_pct),
                 description="95th-percentile max drawdown under 50%",
                 comparator="<",
             )
@@ -277,9 +277,9 @@ def _evaluate_gates(
         gates.append(
             GateVerdict(
                 name="mc_rck_bound_honored",
-                observed=mc_result.prob_dd_exceeds_rck_alpha,
-                threshold=mc_result.rck_beta + 0.02,
-                passed=mc_result.prob_dd_exceeds_rck_alpha <= mc_result.rck_beta + 0.02,
+                observed=float(mc_result.prob_dd_exceeds_rck_alpha),
+                threshold=float(mc_result.rck_beta + 0.02),
+                passed=bool(mc_result.prob_dd_exceeds_rck_alpha <= mc_result.rck_beta + 0.02),
                 description=(
                     f"Empirical P(max DD >= {mc_result.rck_alpha}) within 2pp of the "
                     f"theoretical beta = {mc_result.rck_beta}"

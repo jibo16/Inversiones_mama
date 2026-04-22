@@ -39,7 +39,10 @@ UNIVERSE: dict[str, str] = {
 BENCHMARK: str = "SPY"
 
 # --- Strategy parameters ----------------------------------------------------
-KELLY_FRACTION: float = 0.65             # 0.65 multiplier (Jorge, 2026-04-21)
+KELLY_FRACTION: float = 0.85             # raised 0.65 -> 0.85 on 2026-04-22
+                                         # (Jorge). 35% cash drag was too
+                                         # conservative for a capped $5k paper
+                                         # slice.
 MAX_WEIGHT_PER_NAME: float = 0.15        # per-name cap — lowered from 0.35 on
                                          # 2026-04-22 (Jorge). Forces >=7 active
                                          # positions so expanded universes
@@ -60,6 +63,18 @@ IBKR_FIXED_PER_SHARE: float = 0.0035     # $/share
 IBKR_MIN_PER_ORDER: float = 0.35         # min per order
 IBKR_MAX_PCT_TRADE: float = 0.01         # cap at 1% of trade value
 IBKR_SLIPPAGE_BPS: float = 5.0           # 5bps slippage default (tight for liquid ETFs)
+
+# --- LOB-walk non-linear market impact (Roadmap #1, 2026-04-22) -------------
+# When the order is small vs ADV, only the square-root Almgren-Chriss
+# impact applies (see backtest/costs.py::estimate_slippage). Once the
+# order exceeds LOB_PARTICIPATION_THRESHOLD of ADV, we "walk the book"
+# with a quadratic extra penalty:
+#     extra_bps = LOB_PENALTY_COEFF * (participation / threshold - 1)^2
+# which captures the permanent price impact of sweeping multiple LOB
+# levels. Conservative defaults tuned for US large/mid caps; expect to
+# tune once live paper fills accumulate.
+LOB_PARTICIPATION_THRESHOLD: float = 0.01   # 1% of ADV = "small order" boundary
+LOB_PENALTY_COEFF: float = 10.0             # bps per (overshoot unit)^2
 
 
 # --- Sanity gates (Jorge defaults, 2026-04-21) ------------------------------

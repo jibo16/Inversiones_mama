@@ -45,6 +45,8 @@ from inversiones_mama.config import (
     IBKR_MAX_PCT_TRADE,
     IBKR_MIN_PER_ORDER,
     IBKR_SLIPPAGE_BPS,
+    LOB_PARTICIPATION_THRESHOLD,
+    LOB_PENALTY_COEFF,
 )
 
 
@@ -140,32 +142,37 @@ def estimate_slippage(
     adv: float | None = None,
     base_bps: float = IBKR_SLIPPAGE_BPS,
     impact_coefficient: float = 0.1,
+    lob_walk: bool = True,
+    lob_participation_threshold: float = LOB_PARTICIPATION_THRESHOLD,
+    lob_penalty_coeff: float = LOB_PENALTY_COEFF,
 ) -> float:
     """Estimate execution slippage for a single trade.
 
-    Uses a square-root market impact model (Almgren–Chriss simplified):
+    Three-layer model:
 
-        total_slippage_bps = base_bps + impact_coeff * sqrt(shares / ADV) * 10000
+    1. **Base spread cost** (``base_bps``): always paid for crossing
+       the best bid/ask, even on tiny orders.
+    2. **Square-root Almgren-Chriss impact** (when ``adv`` is available):
+       ``impact_coeff * sqrt(shares / ADV) * 10000`` bps.
+    3. **LOB-walk non-linear penalty** (when ``lob_walk=True`` and the
+       participation rate exceeds ``lob_participation_threshold``):
+       simulates sweeping multiple order-book levels with progressively
+       worse fills. Extra bps = ``lob_penalty_coeff * (participation /
+       threshold - 1)^2``. Punishes orders that gulp more than 1% of ADV.
 
-    If ADV is not provided, uses base_bps only (conservative for liquid ETFs).
+    When ``adv`` is not provided, only base spread applies (conservative
+    for liquid ETFs where we haven't fetched ADV).
 
     Parameters
     ----------
-    shares : int
-        Absolute number of shares.
-    price : float
-        Price per share.
-    adv : float or None
-        Average daily volume in shares. If None, only base slippage is used.
-    base_bps : float
-        Base slippage in basis points (default: 5 bps).
-    impact_coefficient : float
-        Scaling factor for the market impact term (default: 0.1).
-
-    Returns
-    -------
-    float
-        Slippage cost in USD.
+    shares : int               abs number of shares.
+    price : float              price per share (must be positive).
+    adv : float or None        avg daily volume in shares.
+    base_bps : float           base spread in basis points.
+    impact_coefficient : float sqrt-impact scaling (default 0.1).
+    lob_walk : bool            enable the non-linear penalty (default True).
+    lob_participation_threshold : float  threshold above which LOB penalty kicks in.
+    lob_penalty_coeff : float  quadratic coefficient for the LOB penalty.
     """
     abs_shares = abs(shares)
     if abs_shares == 0:
@@ -174,16 +181,17 @@ def estimate_slippage(
         raise ValueError(f"Price must be positive, got {price}")
 
     trade_value = abs_shares * price
-
-    # Base spread cost
     slippage_bps = base_bps
 
-    # Market impact (if ADV is available)
     if adv is not None and adv > 0:
         participation_rate = abs_shares / adv
-        # Square-root impact model
         impact_bps = impact_coefficient * np.sqrt(participation_rate) * 10_000
         slippage_bps += impact_bps
+
+        if lob_walk and participation_rate > lob_participation_threshold:
+            overshoot = (participation_rate / lob_participation_threshold) - 1.0
+            lob_extra_bps = lob_penalty_coeff * (overshoot ** 2)
+            slippage_bps += lob_extra_bps
 
     slippage_usd = trade_value * slippage_bps / 10_000
     return round(slippage_usd, 4)
@@ -204,6 +212,9 @@ def total_trade_cost(
     min_per_order: float = IBKR_MIN_PER_ORDER,
     max_pct_trade: float = IBKR_MAX_PCT_TRADE,
     impact_coefficient: float = 0.1,
+    lob_walk: bool = True,
+    lob_participation_threshold: float = LOB_PARTICIPATION_THRESHOLD,
+    lob_penalty_coeff: float = LOB_PENALTY_COEFF,
 ) -> TradeCost:
     """Compute combined commission + slippage for a single trade.
 
@@ -245,6 +256,9 @@ def total_trade_cost(
     slip = estimate_slippage(
         abs_shares, price, adv=adv,
         base_bps=base_bps, impact_coefficient=impact_coefficient,
+        lob_walk=lob_walk,
+        lob_participation_threshold=lob_participation_threshold,
+        lob_penalty_coeff=lob_penalty_coeff,
     )
     total = comm + slip
     cost_bps = (total / trade_value) * 10_000 if trade_value > 0 else 0.0
@@ -278,6 +292,9 @@ def portfolio_rebalance_cost(
     max_pct_trade: float = IBKR_MAX_PCT_TRADE,
     impact_coefficient: float = 0.1,
     min_trade_value: float = 10.0,
+    lob_walk: bool = True,
+    lob_participation_threshold: float = LOB_PARTICIPATION_THRESHOLD,
+    lob_penalty_coeff: float = LOB_PENALTY_COEFF,
 ) -> RebalanceCost:
     """Estimate the total cost of rebalancing from current to target weights.
 
@@ -345,6 +362,9 @@ def portfolio_rebalance_cost(
             min_per_order=min_per_order,
             max_pct_trade=max_pct_trade,
             impact_coefficient=impact_coefficient,
+            lob_walk=lob_walk,
+            lob_participation_threshold=lob_participation_threshold,
+            lob_penalty_coeff=lob_penalty_coeff,
         )
         trade_details.append(tc)
         total_turnover += tc.trade_value
