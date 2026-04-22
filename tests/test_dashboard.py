@@ -13,6 +13,7 @@ import json
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import pytest
 
 from inversiones_mama.dashboard import charts, data_sources
 
@@ -67,6 +68,49 @@ def test_tickers_matches_universe():
     tickers = data_sources.tickers()
     assert len(tickers) == 10
     assert "SPY" in tickers
+
+
+# --------------------------------------------------------------------------- #
+# Alpaca snapshot + breaker state helpers                                     #
+# --------------------------------------------------------------------------- #
+
+
+def test_load_alpaca_snapshot_returns_none_without_keys(monkeypatch):
+    for name in ("ALPACA_API_KEY_ID", "ALPACA_API_KEY", "alpaca_key",
+                 "ALPACA_API_SECRET_KEY", "ALPACA_SECRET_KEY", "alpaca_secret"):
+        monkeypatch.delenv(name, raising=False)
+    assert data_sources.load_alpaca_account_snapshot() is None
+
+
+def test_compute_breaker_state_ok():
+    s = data_sources.compute_breaker_state(
+        current_wealth=5000.0, peak_wealth=5000.0, threshold_dd=0.5,
+    )
+    assert s["state"] == "ok"
+    assert s["current_drawdown"] == 0.0
+
+
+def test_compute_breaker_state_warn():
+    s = data_sources.compute_breaker_state(
+        current_wealth=3000.0, peak_wealth=5000.0, threshold_dd=0.5, warn_threshold_dd=0.3,
+    )
+    assert s["state"] == "warn"
+    assert s["current_drawdown"] == pytest.approx(0.4)
+
+
+def test_compute_breaker_state_tripped():
+    s = data_sources.compute_breaker_state(
+        current_wealth=2000.0, peak_wealth=5000.0, threshold_dd=0.5,
+    )
+    assert s["state"] == "tripped"
+    assert s["current_drawdown"] == pytest.approx(0.6)
+
+
+def test_compute_breaker_state_zero_peak():
+    s = data_sources.compute_breaker_state(
+        current_wealth=100.0, peak_wealth=0.0, threshold_dd=0.5,
+    )
+    assert s["current_drawdown"] == 0.0
 
 
 # --------------------------------------------------------------------------- #

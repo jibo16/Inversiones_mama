@@ -21,11 +21,15 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
 
 # Make the src package importable when Streamlit launches this script directly
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
+
+# Load .env so Alpaca/IBKR/etc. credentials are visible to the dashboard
+load_dotenv(REPO_ROOT / ".env")
 
 from inversiones_mama.config import GATES, KELLY_FRACTION, MAX_WEIGHT_PER_NAME, UNIVERSE
 from inversiones_mama.dashboard import charts, data_sources
@@ -238,21 +242,91 @@ with tab_mc:
 with tab_paper:
     st.header("Paper-trading execution log")
 
+    # --- Live Alpaca account card (if credentials are configured) ---
+    alpaca_acct = data_sources.load_alpaca_account_snapshot()
+    if alpaca_acct:
+        env_label = "📄 PAPER" if alpaca_acct["is_paper"] else "💰 LIVE"
+        st.subheader(f"Alpaca account · {env_label}")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Status", alpaca_acct["status"] or "—")
+        col2.metric("Cash", f"${alpaca_acct['cash']:,.2f}")
+        col3.metric("Equity", f"${alpaca_acct['equity']:,.2f}")
+        col4.metric("Buying power", f"${alpaca_acct['buying_power']:,.2f}")
+        colA, colB, colC = st.columns(3)
+        colA.metric("Open positions", alpaca_acct["n_positions"])
+        colB.metric("PDT flagged", "yes" if alpaca_acct["pattern_day_trader"] else "no")
+        colC.metric("DayTrading BP", f"${alpaca_acct['daytrading_buying_power']:,.0f}")
+
+        if alpaca_acct["positions"]:
+            st.caption("Positions at the broker:")
+            pos_df = pd.DataFrame([
+                {"ticker": t, "shares": qty} for t, qty in sorted(alpaca_acct["positions"].items())
+            ])
+            st.dataframe(pos_df, use_container_width=True, hide_index=True)
+    else:
+        st.caption(
+            "⚠️ Alpaca not reachable (either credentials missing or the API is down). "
+            "Set `alpaca_key` + `alpaca_secret` in `.env` to see the live account card."
+        )
+
+    # --- Circuit breaker status (synthesized from live equity + last MC) ---
+    mc_cached = st.session_state.get("_mc_last")
+    if alpaca_acct and mc_cached is not None:
+        import numpy as np
+
+        # Use the MC p95 drawdown as the circuit-breaker threshold
+        threshold = float(np.percentile(mc_cached.max_drawdowns, 95))
+        warn_threshold = float(np.percentile(mc_cached.max_drawdowns, 75))
+        # Peak: the max of (current equity, initial_capital). Rough anchor —
+        # the real breaker persists its peak across rebalances.
+        peak = max(alpaca_acct["equity"], mc_cached.initial_capital)
+        breaker = data_sources.compute_breaker_state(
+            current_wealth=alpaca_acct["equity"],
+            peak_wealth=peak,
+            threshold_dd=threshold,
+            warn_threshold_dd=warn_threshold,
+        )
+        st.subheader("🛑 Auto-halt circuit breaker")
+        emoji = {"ok": "✅", "warn": "⚠️", "tripped": "🛑"}[breaker["state"]]
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("State", f"{emoji} {breaker['state'].upper()}")
+        col2.metric("Current drawdown", f"{breaker['current_drawdown'] * 100:.2f}%")
+        col3.metric("Halt threshold (MC p95)", f"{breaker['threshold'] * 100:.2f}%")
+        col4.metric("Warn threshold (MC p75)", f"{breaker['warn_threshold'] * 100:.2f}%")
+        st.caption(
+            "Threshold is the 95th-percentile max drawdown from the most recent Monte Carlo run. "
+            "Run Monte Carlo on the MC tab first to populate this."
+        )
+
+    # --- Cached paper log / summary ---
     paper_summary = data_sources.load_paper_summary()
     paper_log = data_sources.load_paper_trade_log()
+
+    st.divider()
 
     if paper_summary is None and paper_log is None:
         st.info(
             "No paper-trading log yet. Run "
-            "`.venv\\Scripts\\python.exe scripts\\run_paper_rebalance.py` to populate."
+            "`.venv\\Scripts\\python.exe scripts\\run_paper_rebalance.py --broker alpaca --max-capital 5000` "
+            "to populate."
         )
     else:
         if paper_summary:
+            st.subheader("Last rebalance summary")
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Orders placed", paper_summary.get("order_count", "—"))
             col2.metric("Total fill value", f"${paper_summary.get('total_fill_value', 0):,.2f}")
             col3.metric("Est. cost", f"${paper_summary.get('estimated_cost', 0):.2f}")
             col4.metric("Fill rate", f"{paper_summary.get('fill_rate', 0) * 100:.1f}%")
+            meta = []
+            if paper_summary.get("broker"):
+                meta.append(f"broker: `{paper_summary['broker']}`")
+            if paper_summary.get("max_capital"):
+                meta.append(f"max_capital: `${paper_summary['max_capital']:,.0f}`")
+            if paper_summary.get("halted"):
+                meta.append(f"**HALTED** — {paper_summary.get('halt_reason', '?')}")
+            if meta:
+                st.caption(" · ".join(meta))
 
         if paper_log and len(paper_log) > 0:
             col_g, col_s = st.columns([1, 2])

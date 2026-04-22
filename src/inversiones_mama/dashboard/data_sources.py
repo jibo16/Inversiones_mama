@@ -156,3 +156,80 @@ def tickers() -> list[str]:
 
 def ticker_name(t: str) -> str:
     return UNIVERSE.get(t, t)
+
+
+# --------------------------------------------------------------------------- #
+# Alpaca live state (optional; returns None if credentials are unavailable)   #
+# --------------------------------------------------------------------------- #
+
+
+def load_alpaca_account_snapshot() -> dict | None:
+    """Fetch a summary of the Alpaca account if credentials are available.
+
+    Returns None when Alpaca is not configured OR the API is unreachable —
+    the dashboard treats None as "section unavailable" and shows a hint
+    rather than crashing.
+    """
+    try:
+        from ..execution.alpaca import (  # noqa: PLC0415  (lazy import)
+            AlpacaAPIError,
+            AlpacaAuthError,
+            AlpacaClient,
+        )
+    except ImportError:
+        return None
+    try:
+        client = AlpacaClient.from_env()
+    except AlpacaAuthError:
+        return None
+    try:
+        acct = client.check_auth()
+    except (AlpacaAuthError, AlpacaAPIError):
+        return None
+    try:
+        positions = client.get_positions()
+    except AlpacaAPIError:
+        positions = {}
+    return {
+        "status": acct.get("status"),
+        "currency": acct.get("currency", "USD"),
+        "cash": float(acct.get("cash", 0) or 0),
+        "equity": float(acct.get("equity", 0) or 0),
+        "buying_power": float(acct.get("buying_power", 0) or 0),
+        "daytrading_buying_power": float(acct.get("daytrading_buying_power", 0) or 0),
+        "pattern_day_trader": bool(acct.get("pattern_day_trader")),
+        "base_url": client.config.base_url,
+        "is_paper": client.config.is_paper,
+        "positions": positions,
+        "n_positions": len(positions),
+    }
+
+
+def compute_breaker_state(
+    current_wealth: float,
+    peak_wealth: float,
+    threshold_dd: float,
+    warn_threshold_dd: float | None = None,
+) -> dict:
+    """Compute a lightweight breaker snapshot for the dashboard.
+
+    Self-contained so the dashboard doesn't need to persist the full
+    CircuitBreaker instance across reruns.
+    """
+    if warn_threshold_dd is None:
+        warn_threshold_dd = round(threshold_dd * 0.8, 4)
+    dd = max(0.0, 1.0 - current_wealth / peak_wealth) if peak_wealth > 0 else 0.0
+    if dd >= threshold_dd:
+        state = "tripped"
+    elif dd >= warn_threshold_dd:
+        state = "warn"
+    else:
+        state = "ok"
+    return {
+        "state": state,
+        "current_wealth": float(current_wealth),
+        "peak_wealth": float(peak_wealth),
+        "current_drawdown": dd,
+        "threshold": threshold_dd,
+        "warn_threshold": warn_threshold_dd,
+    }
