@@ -77,18 +77,27 @@ class AlpacaConfig:
 
     @classmethod
     def from_env(cls) -> AlpacaConfig:
-        key = os.getenv("ALPACA_API_KEY_ID")
-        secret = os.getenv("ALPACA_API_SECRET_KEY")
+        # Accept several env-var naming conventions. Canonical names
+        # (ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY) match Alpaca's own
+        # docs; shortened lowercase (alpaca_key / alpaca_secret) is what
+        # the .env file in this project uses.
+        key = _first_env("ALPACA_API_KEY_ID", "ALPACA_API_KEY", "alpaca_key")
+        secret = _first_env("ALPACA_API_SECRET_KEY", "ALPACA_SECRET_KEY", "alpaca_secret")
         if not key or not secret:
             raise AlpacaAuthError(
-                "ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY must be set in .env. "
+                "Alpaca credentials must be set in .env. Any of these pairs work: "
+                "(ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY), "
+                "(ALPACA_API_KEY, ALPACA_SECRET_KEY), or "
+                "(alpaca_key, alpaca_secret). "
                 "Get paper credentials at https://app.alpaca.markets/paper/dashboard/overview"
             )
+        base_url = _first_env("ALPACA_BASE_URL", "alpaca_base_url") or DEFAULT_PAPER_BASE_URL
+        data_url = _first_env("ALPACA_DATA_URL", "alpaca_data_url") or DEFAULT_DATA_URL
         return cls(
             api_key=key,
             api_secret=secret,
-            base_url=os.getenv("ALPACA_BASE_URL", DEFAULT_PAPER_BASE_URL).rstrip("/"),
-            data_url=os.getenv("ALPACA_DATA_URL", DEFAULT_DATA_URL).rstrip("/"),
+            base_url=base_url.rstrip("/"),
+            data_url=data_url.rstrip("/"),
             timeout_seconds=float(os.getenv("ALPACA_TIMEOUT_SECONDS", "10")),
             poll_interval_seconds=float(os.getenv("ALPACA_POLL_INTERVAL", "0.5")),
             poll_max_wait_seconds=float(os.getenv("ALPACA_POLL_MAX_WAIT", "30")),
@@ -295,6 +304,15 @@ class AlpacaClient:
 # --------------------------------------------------------------------------- #
 # Helpers                                                                     #
 # --------------------------------------------------------------------------- #
+
+
+def _first_env(*names: str) -> str | None:
+    """Return the first non-empty env var from ``names``, else None."""
+    for n in names:
+        v = os.getenv(n)
+        if v:
+            return v
+    return None
 
 
 def _to_float(value: object) -> float | None:

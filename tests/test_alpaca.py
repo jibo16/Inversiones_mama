@@ -69,10 +69,33 @@ def test_config_from_env_reads_keys(monkeypatch):
 
 
 def test_config_from_env_raises_without_keys(monkeypatch):
-    monkeypatch.delenv("ALPACA_API_KEY_ID", raising=False)
-    monkeypatch.delenv("ALPACA_API_SECRET_KEY", raising=False)
-    with pytest.raises(AlpacaAuthError, match="ALPACA_API_KEY_ID"):
+    for name in ("ALPACA_API_KEY_ID", "ALPACA_API_KEY", "alpaca_key",
+                 "ALPACA_API_SECRET_KEY", "ALPACA_SECRET_KEY", "alpaca_secret"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(AlpacaAuthError, match="Alpaca credentials"):
         AlpacaConfig.from_env()
+
+
+def test_config_from_env_accepts_lowercase_shortnames(monkeypatch):
+    """Project .env uses alpaca_key / alpaca_secret — must be accepted."""
+    for name in ("ALPACA_API_KEY_ID", "ALPACA_API_KEY", "ALPACA_API_SECRET_KEY", "ALPACA_SECRET_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("alpaca_key", "PK_test")
+    monkeypatch.setenv("alpaca_secret", "secret_test")
+    c = AlpacaConfig.from_env()
+    assert c.api_key == "PK_test"
+    assert c.api_secret == "secret_test"
+
+
+def test_config_from_env_canonical_names_win_over_shortnames(monkeypatch):
+    """If both conventions are set, the canonical uppercase wins."""
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "canonical_key")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "canonical_secret")
+    monkeypatch.setenv("alpaca_key", "short_key")
+    monkeypatch.setenv("alpaca_secret", "short_secret")
+    c = AlpacaConfig.from_env()
+    assert c.api_key == "canonical_key"
+    assert c.api_secret == "canonical_secret"
 
 
 def test_config_respects_custom_base_url(monkeypatch):
