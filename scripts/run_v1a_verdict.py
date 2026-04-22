@@ -41,9 +41,13 @@ def main() -> int:
     print(f"  shape: {factors.shape}")
 
     print("Running full v1a validation (walk-forward + MC + gates)...")
+    # v1a hardening (2026-04-22):
+    #   * oos_split_date = 2023-01-01 (chronological) — not median-of-series.
+    #   * MC bootstrap source = full history (done in gates.run_full_validation).
     report = run_full_validation(
         prices,
         factors,
+        oos_split_date=datetime(2023, 1, 1),
         mc_n_paths=5_000,
         mc_horizon_days=252,
         rng=np.random.default_rng(20260422),

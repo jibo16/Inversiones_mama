@@ -152,12 +152,14 @@ def run_full_validation(
     mc_result: MCValidationResult | None = None
     if engine_result.rebalance_records:
         last_weights = engine_result.rebalance_records[-1].target_weights
-        # Use the most recent `mc_horizon_days` (or up to 252 days) of returns
-        # as the bootstrap source. Floor the source size so the bootstrap has
-        # at least enough independent observations to resample from.
+        # v1a hardening (2026-04-22): use the FULL price history as the
+        # bootstrap source, not the trailing `mc_horizon_days` window. The
+        # trailing window induces recency bias and blinds the MC to
+        # regime shifts like the 2022 bond/equity joint selloff. Full
+        # history makes the stationary bootstrap resample across *all*
+        # observed regimes proportional to their length.
         returns = prices.pct_change().dropna(how="all")
-        source_window = max(mc_horizon_days, 30)
-        bootstrap_source = returns.tail(source_window).reindex(columns=prices.columns)
+        bootstrap_source = returns.reindex(columns=prices.columns).dropna(how="all")
         if len(bootstrap_source) >= max(mc_horizon_days, 20):
             mc_result = run_mc_rck_validation(
                 bootstrap_source,
