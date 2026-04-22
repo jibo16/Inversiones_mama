@@ -100,10 +100,17 @@ def load_prices(
     if source == "yfinance":
         df = fetch_prices_yfinance(tickers_sorted, start, end)
     elif source == "ibkr":
-        # Lazy import so the IBKR dependency is optional
-        from ..execution.ibkr import IBKRAdapter
+        # Lazy import — IBKR historical needs a running, authenticated Gateway.
+        from .ibkr_historical import IBKRHistoricalLoader
 
-        df = IBKRAdapter.fetch_prices(tickers_sorted, start, end)
+        loader = IBKRHistoricalLoader.from_env()
+        loader.ensure_authenticated()
+        period = _derive_ibkr_period(start, end)
+        df = loader.fetch_many(tickers_sorted, period=period)
+        # Trim to exact [start, end] since IBKR's period is coarse ("1y"/"5y"/etc.)
+        lo = pd.Timestamp(start)
+        hi = pd.Timestamp(end)
+        df = df[(df.index >= lo) & (df.index <= hi)]
     else:
         raise ValueError(f"Unknown source: {source}")
 
@@ -115,6 +122,25 @@ def load_prices(
         # Return via cache to guarantee identical dtype/shape on subsequent calls
         return cache.get(key)
     return df
+
+
+def _derive_ibkr_period(start: datetime, end: datetime) -> str:
+    """Pick the smallest IBKR period string that covers [start, end].
+
+    IBKR's ``/iserver/marketdata/history`` takes coarse period strings
+    (``"1y"``, ``"5y"``, etc.). We pick the first alias whose span
+    covers the requested range and trim the excess client-side.
+    """
+    days = (end - start).days
+    if days <= 365:
+        return "1y"
+    if days <= 365 * 2:
+        return "2y"
+    if days <= 365 * 3:
+        return "3y"
+    if days <= 365 * 5:
+        return "5y"
+    return "10y"
 
 
 def returns_from_prices(prices: pd.DataFrame, method: str = "simple") -> pd.DataFrame:

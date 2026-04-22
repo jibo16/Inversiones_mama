@@ -102,10 +102,13 @@ def test_load_prices_unknown_source_raises(tmp_path, monkeypatch):
         load_prices(["SPY"], datetime(2024, 1, 1), datetime(2024, 2, 1), source="bogus")
 
 
-def test_load_prices_ibkr_source_raises_not_implemented(tmp_path, monkeypatch):
-    """Until the IBKR account is wired, source='ibkr' must surface clearly."""
+def test_load_prices_ibkr_source_requires_running_gateway(tmp_path, monkeypatch):
+    """source='ibkr' needs an authenticated Gateway; without one, surface clearly."""
+    from inversiones_mama.execution.ibkr import IBKRConnectionError
+
     monkeypatch.setattr(prices_mod, "CACHE_DIR", tmp_path)
-    with pytest.raises(NotImplementedError):
+    # No Gateway running on localhost:5000 during tests -> IBKRConnectionError
+    with pytest.raises((IBKRConnectionError, RuntimeError)):
         load_prices(["SPY"], datetime(2024, 1, 1), datetime(2024, 2, 1), source="ibkr", use_cache=False)
 
 

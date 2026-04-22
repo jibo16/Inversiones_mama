@@ -72,19 +72,36 @@ NASDAQ100_CORE: tuple[str, ...] = (
 # and volatility exposures.
 LIQUID_ETFS: tuple[str, ...] = (
     # Broad US equity
-    "SPY", "IVV", "VOO", "QQQ", "DIA", "IWM",
-    # International / EM
-    "EFA", "VEA", "IEFA", "EEM", "IEMG", "VWO",
-    # Bonds
-    "AGG", "BND", "TLT", "IEF", "LQD", "HYG",
-    # Gold / commodities
-    "GLD", "IAU", "SLV", "DBC",
+    "SPY", "IVV", "VOO", "QQQ", "DIA", "IWM", "VTI", "ITOT",
+    # International developed
+    "EFA", "VEA", "IEFA", "SCHF", "IEUR", "EWJ", "EWG", "EWU",
+    # Emerging markets
+    "EEM", "IEMG", "VWO", "SCHE", "MCHI", "INDA", "EWZ",
+    # US Treasuries (short / intermediate / long / TIPS)
+    "SHY", "SHV", "BIL", "IEF", "IEI", "TLT", "GOVT", "TIP", "VTIP",
+    # US credit (investment grade / high yield / floating / munis)
+    "AGG", "BND", "LQD", "VCIT", "VCSH", "HYG", "JNK", "USHY", "FLOT", "MUB", "SUB",
+    # International / EM bonds
+    "BNDX", "IAGG", "EMB", "PCY",
+    # Gold / silver / precious
+    "GLD", "IAU", "GLDM", "SLV", "PPLT",
+    # Broad commodities
+    "DBC", "PDBC", "GSG",
+    # Energy commodities (ETPs)
+    "USO", "UNG", "BNO",
+    # Agriculture
+    "DBA", "CORN",
     # Factor / style
-    "VLUE", "MTUM", "QUAL", "USMV", "AVUV", "AVDV", "AVEM",
-    # Sector (highest volume subset)
-    "XLF", "XLK", "XLE", "XLV", "XLY", "XLP", "XLI",
+    "VLUE", "MTUM", "QUAL", "USMV", "SPLV",
+    "AVUV", "AVDV", "AVEM", "DFAC", "DFAS",
+    "VBR", "IJS", "IWN",  # small-cap value
+    "IWF", "IWD",  # Russell large growth / value
+    # Sector SPDRs
+    "XLF", "XLK", "XLE", "XLV", "XLY", "XLP", "XLI", "XLB", "XLU", "XLRE", "XLC",
     # Real estate
-    "VNQ", "IYR",
+    "VNQ", "IYR", "REM",
+    # Volatility / low-vol / crisis
+    "VXX", "SVXY",
 )
 
 

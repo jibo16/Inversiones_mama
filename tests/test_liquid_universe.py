@@ -30,6 +30,11 @@ def test_nasdaq100_size_reasonable():
     assert 80 <= len(NASDAQ100_CORE) <= 110
 
 
+def test_liquid_etfs_size_sane_after_expansion():
+    # Expansion added bonds + commodities + full sector coverage + regional
+    assert 70 <= len(LIQUID_ETFS) <= 120
+
+
 def test_liquid_etfs_includes_core_broad_exposure():
     etfs = set(LIQUID_ETFS)
     assert "SPY" in etfs
@@ -37,6 +42,29 @@ def test_liquid_etfs_includes_core_broad_exposure():
     assert "TLT" in etfs
     assert "GLD" in etfs
     assert "AVUV" in etfs  # v1a universe member
+
+
+def test_liquid_etfs_covers_full_bond_curve():
+    """Expanded universe (2026-04-22) should span Treasury tenors + credit qualities."""
+    etfs = set(LIQUID_ETFS)
+    # Short / intermediate / long Treasuries
+    assert {"SHV", "IEF", "TLT"}.issubset(etfs)
+    # Investment grade vs high yield credit
+    assert {"LQD", "HYG"}.issubset(etfs)
+    # Munis + international bonds
+    assert {"MUB", "BNDX", "EMB"}.issubset(etfs)
+
+
+def test_liquid_etfs_covers_commodities_beyond_gold():
+    etfs = set(LIQUID_ETFS)
+    # Broad + energy + ag
+    assert {"DBC", "USO", "UNG", "DBA"}.issubset(etfs)
+
+
+def test_liquid_etfs_covers_all_sector_spdrs():
+    etfs = set(LIQUID_ETFS)
+    for s in ["XLF", "XLK", "XLE", "XLV", "XLY", "XLP", "XLI", "XLB", "XLU", "XLRE", "XLC"]:
+        assert s in etfs, f"missing sector SPDR {s}"
 
 
 def test_curated_tickers_all_uppercase_and_unique():
