@@ -225,3 +225,63 @@ def test_orchestrator_signal_context_propagates(synthetic_market):
     summary = orch.rebalance(signal_context={"run_id": "test-run-42"})
     for entry in summary.trade_log:
         assert entry.signal.context["run_id"] == "test-run-42"
+
+
+# --------------------------------------------------------------------------- #
+# Circuit-breaker + PDT gate integration                                      #
+# --------------------------------------------------------------------------- #
+
+
+def test_orchestrator_circuit_breaker_halts_on_trip(synthetic_market):
+    """If the breaker is already tripped (wealth below threshold), rebalance halts."""
+    from inversiones_mama.execution.circuit_breaker import CircuitBreaker
+
+    prices, factors = synthetic_market
+    c = DryRunClient(starting_cash=2000.0)  # start "below" an assumed 5000 peak
+    for t in prices.columns:
+        c.set_latest_price(t, float(prices[t].iloc[-1]))
+    orch = PaperTradingOrchestrator(c, prices, factors, lookback_days=252)
+
+    # Pretend the peak was 5000 and we're now at 2000 (60% drawdown).
+    # Threshold 0.30 → this will trip on first update.
+    breaker = CircuitBreaker(threshold=0.30, initial_wealth=5000.0)
+
+    summary = orch.rebalance(circuit_breaker=breaker)
+    assert summary.halted is True
+    assert summary.order_count == 0
+    assert "circuit_breaker_tripped" in (summary.halt_reason or "")
+    assert summary.breaker_drawdown is not None
+    assert summary.breaker_drawdown > 0.30
+
+
+def test_orchestrator_circuit_breaker_passes_when_ok(synthetic_market):
+    """When wealth hasn't dropped below threshold, rebalance proceeds normally."""
+    from inversiones_mama.execution.circuit_breaker import CircuitBreaker
+
+    prices, factors = synthetic_market
+    c = DryRunClient(starting_cash=5000.0)
+    for t in prices.columns:
+        c.set_latest_price(t, float(prices[t].iloc[-1]))
+    orch = PaperTradingOrchestrator(c, prices, factors, lookback_days=252)
+    breaker = CircuitBreaker(threshold=0.50, initial_wealth=5000.0)
+    summary = orch.rebalance(circuit_breaker=breaker)
+    assert summary.halted is False
+    assert summary.order_count >= 1
+    assert summary.breaker_drawdown == 0.0
+
+
+def test_orchestrator_exempt_pdt_tracker_never_blocks(synthetic_market):
+    """PDT-exempt account (>= $25k) never has orders skipped regardless of log."""
+    from inversiones_mama.execution.pdt import PDTTracker
+
+    prices, factors = synthetic_market
+    c = DryRunClient(starting_cash=30_000.0)
+    for t in prices.columns:
+        c.set_latest_price(t, float(prices[t].iloc[-1]))
+    orch = PaperTradingOrchestrator(c, prices, factors, lookback_days=252)
+    pdt = PDTTracker(account_equity=30_000.0)
+    assert pdt.exempt is True
+
+    summary = orch.rebalance(pdt_tracker=pdt)
+    assert summary.halt_reason is None
+    assert summary.order_count >= 1

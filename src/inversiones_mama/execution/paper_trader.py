@@ -54,7 +54,9 @@ from ..models.factor_regression import (
     fit_factor_loadings,
 )
 from ..sizing.kelly import solve_rck
+from .circuit_breaker import CircuitBreaker
 from .ibkr import OrderIntent
+from .pdt import PDTTracker
 from .trade_log import FillRecord, SignalRecord, TradeLog
 
 log = logging.getLogger(__name__)
@@ -187,6 +189,10 @@ class PaperRebalanceSummary:
     total_fill_value: float
     estimated_cost: float
     trade_log: TradeLog = field(default_factory=TradeLog)
+    # Safety-gate status (populated when a gate halts the cycle)
+    halted: bool = False
+    halt_reason: str | None = None
+    breaker_drawdown: float | None = None
 
     @property
     def fill_rate(self) -> float:
@@ -254,8 +260,29 @@ class PaperTradingOrchestrator:
         )
         return result.weights.reindex(tickers).fillna(0.0)
 
-    def rebalance(self, signal_context: dict | None = None) -> PaperRebalanceSummary:
+    def rebalance(
+        self,
+        signal_context: dict | None = None,
+        *,
+        circuit_breaker: CircuitBreaker | None = None,
+        pdt_tracker: PDTTracker | None = None,
+        prior_trade_log: TradeLog | None = None,
+    ) -> PaperRebalanceSummary:
         """Execute one rebalance cycle.
+
+        Parameters
+        ----------
+        signal_context : optional dict attached to every SignalRecord.
+        circuit_breaker : optional auto-halt gate. If set, the rebalance
+            updates the breaker with current wealth BEFORE placing any
+            orders; if it trips, the cycle returns halted=True with
+            order_count=0.
+        pdt_tracker : optional Pattern-Day-Trader gate. If set, and the
+            account is below the PDT equity threshold, same-day round-trip
+            orders that would breach the 3-in-5 rule are skipped (logged
+            but not submitted).
+        prior_trade_log : optional previous TradeLog (only used by
+            pdt_tracker so the PDT count carries over across cycles).
 
         Returns a ``PaperRebalanceSummary`` with the weight vectors, the
         generated order list, the ``TradeLog`` of every signal+fill, and
@@ -278,6 +305,35 @@ class PaperTradingOrchestrator:
         portfolio_value = cash + position_value
         if portfolio_value <= 0:
             raise ValueError(f"Non-positive portfolio value: {portfolio_value}")
+
+        # --- Circuit-breaker gate ---
+        breaker_dd: float | None = None
+        if circuit_breaker is not None:
+            status = circuit_breaker.update(portfolio_value, as_of=now)
+            breaker_dd = status.current_drawdown
+            if status.tripped:
+                log.warning(
+                    "Circuit breaker TRIPPED at %s — dd=%.2f%% >= threshold=%.2f%%. "
+                    "Halting rebalance.",
+                    now, status.current_drawdown * 100, status.threshold * 100,
+                )
+                return PaperRebalanceSummary(
+                    rebalance_time=now,
+                    tickers=tuple(tickers),
+                    target_weights=pd.Series(np.zeros(len(tickers)), index=tickers),
+                    current_weights_before=pd.Series(
+                        {t: current_positions.get(t, 0) * (latest_prices[t] or 0.0) / portfolio_value
+                         for t in tickers},
+                        index=tickers,
+                    ),
+                    order_count=0,
+                    total_fill_value=0.0,
+                    estimated_cost=0.0,
+                    trade_log=TradeLog(),
+                    halted=True,
+                    halt_reason=f"circuit_breaker_tripped (dd={status.current_drawdown:.2%})",
+                    breaker_drawdown=status.current_drawdown,
+                )
 
         # Current weights
         current_w = pd.Series(
@@ -309,6 +365,7 @@ class PaperTradingOrchestrator:
         trade_log = TradeLog()
         total_fill_value = 0.0
         n_orders = 0
+        pdt_skipped = 0
         for t in tickers:
             px = latest_prices[t]
             if px is None or px <= 0:
@@ -319,6 +376,21 @@ class PaperTradingOrchestrator:
             delta_shares = int(round(delta_dollar / px))
             if delta_shares == 0:
                 continue
+
+            # --- PDT gate ---
+            # A rebalance order becomes a "day trade" only if it closes a same-day
+            # position opened earlier. For our monthly cadence this is rare, but
+            # we guard against it defensively. We treat the PDT check as a soft
+            # gate: skip the order and keep going.
+            if pdt_tracker is not None and not pdt_tracker.exempt:
+                merged_log = _merge_logs(prior_trade_log, trade_log)
+                if not pdt_tracker.can_execute_new_day_trade(merged_log, as_of=now.date()):
+                    log.warning(
+                        "PDT gate blocked order: ticker=%s delta_shares=%d, "
+                        "window day-trade count exhausted.", t, delta_shares,
+                    )
+                    pdt_skipped += 1
+                    continue
 
             signal = SignalRecord(
                 ticker=t,
@@ -343,4 +415,23 @@ class PaperTradingOrchestrator:
             total_fill_value=total_fill_value,
             estimated_cost=float(estimated_cost),
             trade_log=trade_log,
+            halted=False,
+            halt_reason=(f"pdt_skipped_{pdt_skipped}_orders" if pdt_skipped else None),
+            breaker_drawdown=breaker_dd,
         )
+
+
+# --------------------------------------------------------------------------- #
+# Helpers                                                                     #
+# --------------------------------------------------------------------------- #
+
+
+def _merge_logs(prior: TradeLog | None, current: TradeLog) -> TradeLog:
+    """Return a TradeLog containing entries from both ``prior`` and ``current``."""
+    merged = TradeLog()
+    if prior is not None:
+        for entry in prior:
+            merged.append(entry)
+    for entry in current:
+        merged.append(entry)
+    return merged
