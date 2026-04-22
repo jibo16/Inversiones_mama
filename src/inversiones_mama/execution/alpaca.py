@@ -1,0 +1,316 @@
+"""Alpaca Markets ExecutionClient adapter.
+
+Parallel paper-trading target alongside IBKR. Alpaca is API-first with
+no 2FA ceremony for paper accounts — ideal for a fast automated
+sandbox. IBKR remains the ultimate live-execution target (better
+margin rates + DMA), but Alpaca lets us run paper cycles unattended.
+
+Why raw REST and not the ``alpaca-py`` SDK:
+the SDK breaks API every few months and adds 40+ transitive deps.
+Alpaca's REST surface is tiny and stable (v2 endpoints haven't broken
+in years). ~5 methods are all we need.
+
+Config
+------
+Environment variables (also in ``.env.example``):
+
+* ``ALPACA_API_KEY_ID`` — paper or live key.
+* ``ALPACA_API_SECRET_KEY`` — matching secret.
+* ``ALPACA_BASE_URL`` — trading base. Defaults to paper.
+* ``ALPACA_DATA_URL`` — data API base. Defaults to ``https://data.alpaca.markets``.
+
+Public API
+----------
+``AlpacaConfig`` — connection settings with .from_env() factory.
+``AlpacaClient`` — implements ``ExecutionClient`` Protocol.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+import requests
+
+from .ibkr import OrderIntent
+from .trade_log import FillRecord
+
+log = logging.getLogger(__name__)
+
+DEFAULT_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+DEFAULT_LIVE_BASE_URL = "https://api.alpaca.markets"
+DEFAULT_DATA_URL = "https://data.alpaca.markets"
+
+
+class AlpacaError(RuntimeError):
+    """Base exception for Alpaca adapter failures."""
+
+
+class AlpacaAuthError(AlpacaError):
+    """Raised when Alpaca credentials are missing or rejected."""
+
+
+class AlpacaAPIError(AlpacaError):
+    """Raised when Alpaca returns an unexpected status / payload."""
+
+
+# --------------------------------------------------------------------------- #
+# Config                                                                      #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class AlpacaConfig:
+    """Connection settings for the Alpaca adapter."""
+
+    api_key: str
+    api_secret: str
+    base_url: str = DEFAULT_PAPER_BASE_URL
+    data_url: str = DEFAULT_DATA_URL
+    timeout_seconds: float = 10.0
+    poll_interval_seconds: float = 0.5
+    poll_max_wait_seconds: float = 30.0
+
+    @classmethod
+    def from_env(cls) -> AlpacaConfig:
+        key = os.getenv("ALPACA_API_KEY_ID")
+        secret = os.getenv("ALPACA_API_SECRET_KEY")
+        if not key or not secret:
+            raise AlpacaAuthError(
+                "ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY must be set in .env. "
+                "Get paper credentials at https://app.alpaca.markets/paper/dashboard/overview"
+            )
+        return cls(
+            api_key=key,
+            api_secret=secret,
+            base_url=os.getenv("ALPACA_BASE_URL", DEFAULT_PAPER_BASE_URL).rstrip("/"),
+            data_url=os.getenv("ALPACA_DATA_URL", DEFAULT_DATA_URL).rstrip("/"),
+            timeout_seconds=float(os.getenv("ALPACA_TIMEOUT_SECONDS", "10")),
+            poll_interval_seconds=float(os.getenv("ALPACA_POLL_INTERVAL", "0.5")),
+            poll_max_wait_seconds=float(os.getenv("ALPACA_POLL_MAX_WAIT", "30")),
+        )
+
+    @property
+    def is_paper(self) -> bool:
+        return "paper" in self.base_url
+
+
+# --------------------------------------------------------------------------- #
+# Client                                                                      #
+# --------------------------------------------------------------------------- #
+
+
+class AlpacaClient:
+    """Implements ``execution.paper_trader.ExecutionClient`` against Alpaca v2."""
+
+    def __init__(
+        self,
+        config: AlpacaConfig,
+        *,
+        session: requests.Session | None = None,
+    ) -> None:
+        self.config = config
+        self.session = session or requests.Session()
+        self.session.headers.update(self._auth_headers())
+
+    @classmethod
+    def from_env(cls) -> AlpacaClient:
+        return cls(AlpacaConfig.from_env())
+
+    # ------------------------------------------------------------ auth
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {
+            "APCA-API-KEY-ID": self.config.api_key,
+            "APCA-API-SECRET-KEY": self.config.api_secret,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+
+    def check_auth(self) -> dict:
+        """Ping /v2/account to confirm credentials + network are OK."""
+        return self._get(f"{self.config.base_url}/v2/account")
+
+    # ---------------------------------------------------- ExecutionClient API
+
+    def get_positions(self) -> dict[str, int]:
+        payload = self._get(f"{self.config.base_url}/v2/positions")
+        out: dict[str, int] = {}
+        for p in payload or []:
+            symbol = str(p.get("symbol", "")).upper()
+            qty = _to_float(p.get("qty"))
+            if symbol and qty is not None:
+                out[symbol] = int(qty)
+        return out
+
+    def get_cash(self) -> float:
+        acct = self._get(f"{self.config.base_url}/v2/account")
+        cash = _to_float(acct.get("cash"))
+        if cash is None:
+            raise AlpacaAPIError("Alpaca /v2/account returned no 'cash' field")
+        return float(cash)
+
+    def get_latest_price(self, ticker: str) -> float | None:
+        """Latest quote midpoint for ``ticker``. Falls back to ask, then bid, then None."""
+        ticker = ticker.upper().strip()
+        if not ticker:
+            return None
+        url = f"{self.config.data_url}/v2/stocks/{ticker}/quotes/latest"
+        try:
+            payload = self._get(url)
+        except AlpacaAPIError:
+            return None
+        quote = payload.get("quote") if isinstance(payload, dict) else None
+        if not quote:
+            return None
+        ask = _to_float(quote.get("ap"))
+        bid = _to_float(quote.get("bp"))
+        if ask is not None and bid is not None and ask > 0 and bid > 0:
+            return (ask + bid) / 2.0
+        if ask is not None and ask > 0:
+            return ask
+        if bid is not None and bid > 0:
+            return bid
+        return None
+
+    def submit_order(self, intent: OrderIntent) -> FillRecord:
+        """Submit an Alpaca order matching the OrderIntent and poll for fill."""
+        order_time = datetime.now(tz=timezone.utc)
+        side = "buy" if intent.shares > 0 else "sell"
+        qty = abs(int(intent.shares))
+        if qty == 0:
+            return FillRecord(
+                order_time=order_time, fill_time=None, fill_price=None,
+                filled_quantity=0, status="rejected",
+                context={"reason": "zero_shares"},
+            )
+
+        order_type = intent.order_type.lower()
+        tif = intent.tif.lower()
+        body: dict[str, object] = {
+            "symbol": intent.ticker.upper(),
+            "qty": str(qty),
+            "side": side,
+            "type": order_type,
+            "time_in_force": tif,
+        }
+        if order_type == "lmt":
+            body["type"] = "limit"
+            body["limit_price"] = str(intent.limit_price or 0.0)
+
+        try:
+            resp = self._post(f"{self.config.base_url}/v2/orders", json_body=body)
+        except AlpacaAPIError as exc:
+            log.warning("Alpaca submit_order failed: %s", exc)
+            return FillRecord(
+                order_time=order_time, fill_time=None, fill_price=None,
+                filled_quantity=0, status="rejected",
+                context={"reason": "api_error", "detail": str(exc)[:200]},
+            )
+
+        order_id = resp.get("id")
+        if not order_id:
+            return FillRecord(
+                order_time=order_time, fill_time=None, fill_price=None,
+                filled_quantity=0, status="rejected",
+                context={"reason": "no_order_id", "raw": str(resp)[:200]},
+            )
+
+        # Poll for fill
+        return self._poll_for_fill(str(order_id), order_time, qty)
+
+    def _poll_for_fill(self, order_id: str, order_time: datetime, expected_qty: int) -> FillRecord:
+        deadline = time.monotonic() + self.config.poll_max_wait_seconds
+        last_status = "submitted"
+        while time.monotonic() < deadline:
+            try:
+                o = self._get(f"{self.config.base_url}/v2/orders/{order_id}")
+            except AlpacaAPIError as exc:
+                log.warning("Alpaca poll failed for %s: %s", order_id, exc)
+                break
+            last_status = str(o.get("status", "submitted")).lower()
+            if last_status == "filled":
+                fill_price = _to_float(o.get("filled_avg_price"))
+                filled_qty = int(_to_float(o.get("filled_qty")) or 0)
+                return FillRecord(
+                    order_time=order_time,
+                    fill_time=_parse_iso(o.get("filled_at")) or datetime.now(tz=timezone.utc),
+                    fill_price=fill_price,
+                    filled_quantity=filled_qty,
+                    status="filled",
+                    broker_order_id=order_id,
+                )
+            if last_status in {"partially_filled"}:
+                # Partial — continue polling unless we hit the deadline
+                pass
+            if last_status in {"rejected", "canceled", "expired"}:
+                return FillRecord(
+                    order_time=order_time, fill_time=None, fill_price=None,
+                    filled_quantity=0, status=last_status,
+                    broker_order_id=order_id,
+                )
+            time.sleep(self.config.poll_interval_seconds)
+
+        # Timed out — treat as "submitted" so callers can follow up
+        return FillRecord(
+            order_time=order_time, fill_time=None, fill_price=None,
+            filled_quantity=0, status=last_status,
+            broker_order_id=order_id,
+            context={"reason": "poll_timeout"},
+        )
+
+    # ------------------------------------------------------------ HTTP helpers
+
+    def _get(self, url: str, params: dict | None = None):
+        try:
+            resp = self.session.get(url, params=params, timeout=self.config.timeout_seconds)
+        except Exception as exc:  # noqa: BLE001
+            raise AlpacaAPIError(f"GET {url} failed: {exc}") from exc
+        return self._parse_response(resp, url)
+
+    def _post(self, url: str, json_body: dict | None = None):
+        try:
+            resp = self.session.post(url, json=json_body, timeout=self.config.timeout_seconds)
+        except Exception as exc:  # noqa: BLE001
+            raise AlpacaAPIError(f"POST {url} failed: {exc}") from exc
+        return self._parse_response(resp, url)
+
+    def _parse_response(self, resp: requests.Response, url: str):
+        if resp.status_code == 401 or resp.status_code == 403:
+            raise AlpacaAuthError(f"Alpaca auth rejected at {url}: HTTP {resp.status_code}")
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError as exc:
+            raise AlpacaAPIError(f"{url}: {exc} (body={resp.text[:200]})") from exc
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise AlpacaAPIError(f"{url}: response was not JSON") from exc
+
+
+# --------------------------------------------------------------------------- #
+# Helpers                                                                     #
+# --------------------------------------------------------------------------- #
+
+
+def _to_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_iso(value: object) -> datetime | None:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        # Alpaca returns e.g. "2025-04-22T14:30:00.123456Z"
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
