@@ -198,18 +198,26 @@ class AlpacaClient:
                 context={"reason": "zero_shares"},
             )
 
-        order_type = intent.order_type.lower()
-        tif = intent.tif.lower()
+        # Map our broker-agnostic OrderIntent.order_type (IBKR convention:
+        # "MKT", "LMT") to Alpaca's vocabulary ("market", "limit", etc.)
+        order_type_raw = intent.order_type.upper()
+        alpaca_type = _ORDER_TYPE_MAP.get(order_type_raw, order_type_raw.lower())
+        alpaca_tif = _TIF_MAP.get(intent.tif.upper(), intent.tif.lower())
         body: dict[str, object] = {
             "symbol": intent.ticker.upper(),
             "qty": str(qty),
             "side": side,
-            "type": order_type,
-            "time_in_force": tif,
+            "type": alpaca_type,
+            "time_in_force": alpaca_tif,
         }
-        if order_type == "lmt":
-            body["type"] = "limit"
-            body["limit_price"] = str(intent.limit_price or 0.0)
+        if alpaca_type == "limit":
+            if intent.limit_price is None or intent.limit_price <= 0:
+                return FillRecord(
+                    order_time=order_time, fill_time=None, fill_price=None,
+                    filled_quantity=0, status="rejected",
+                    context={"reason": "limit_order_missing_price"},
+                )
+            body["limit_price"] = str(intent.limit_price)
 
         try:
             resp = self._post(f"{self.config.base_url}/v2/orders", json_body=body)
@@ -304,6 +312,31 @@ class AlpacaClient:
 # --------------------------------------------------------------------------- #
 # Helpers                                                                     #
 # --------------------------------------------------------------------------- #
+
+
+# Maps from our broker-agnostic vocabulary (IBKR convention on the
+# OrderIntent dataclass) to Alpaca's REST v2 enum values.
+_ORDER_TYPE_MAP: dict[str, str] = {
+    "MKT":          "market",
+    "MARKET":       "market",
+    "LMT":          "limit",
+    "LIMIT":        "limit",
+    "STP":          "stop",
+    "STOP":         "stop",
+    "STP_LMT":      "stop_limit",
+    "STOP_LIMIT":   "stop_limit",
+    "TRAIL":        "trailing_stop",
+    "TRAILING_STOP": "trailing_stop",
+}
+
+_TIF_MAP: dict[str, str] = {
+    "DAY": "day",
+    "GTC": "gtc",
+    "IOC": "ioc",
+    "FOK": "fok",
+    "OPG": "opg",
+    "CLS": "cls",
+}
 
 
 def _first_env(*names: str) -> str | None:

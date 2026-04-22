@@ -223,6 +223,53 @@ def test_submit_order_zero_shares_rejected():
     assert fill.context["reason"] == "zero_shares"
 
 
+def test_submit_order_maps_mkt_to_market():
+    """OrderIntent.order_type='MKT' must translate to Alpaca 'market'."""
+    captured: dict = {}
+
+    def capture_post(url, json=None, **kw):
+        captured["body"] = json
+        return _fake_response(201, {"id": "o1", "status": "accepted"})
+
+    config = AlpacaConfig(api_key="k", api_secret="s",
+                          poll_interval_seconds=0.0, poll_max_wait_seconds=0.0)
+    client = AlpacaClient(config=config)
+    client.session.post = MagicMock(side_effect=capture_post)
+    client.session.get = MagicMock(side_effect=lambda url, **kw: _fake_response(
+        200, {"id": "o1", "status": "submitted"}))
+
+    client.submit_order(OrderIntent(ticker="AAPL", shares=10, order_type="MKT"))
+    assert captured["body"]["type"] == "market"
+    assert captured["body"]["time_in_force"] == "day"
+
+
+def test_submit_order_maps_lmt_to_limit():
+    captured: dict = {}
+
+    def capture_post(url, json=None, **kw):
+        captured["body"] = json
+        return _fake_response(201, {"id": "o2", "status": "accepted"})
+
+    config = AlpacaConfig(api_key="k", api_secret="s",
+                          poll_interval_seconds=0.0, poll_max_wait_seconds=0.0)
+    client = AlpacaClient(config=config)
+    client.session.post = MagicMock(side_effect=capture_post)
+    client.session.get = MagicMock(side_effect=lambda url, **kw: _fake_response(
+        200, {"id": "o2", "status": "submitted"}))
+
+    client.submit_order(OrderIntent(ticker="AAPL", shares=10, order_type="LMT", limit_price=150.0))
+    assert captured["body"]["type"] == "limit"
+    assert captured["body"]["limit_price"] == "150.0"
+
+
+def test_submit_limit_without_price_rejected_locally():
+    """A limit order without a valid limit_price is rejected before any HTTP."""
+    client = _client_with_routes({})
+    fill = client.submit_order(OrderIntent(ticker="AAPL", shares=10, order_type="LMT"))
+    assert fill.status == "rejected"
+    assert fill.context["reason"] == "limit_order_missing_price"
+
+
 def test_submit_order_filled_immediately():
     client = _client_with_routes({
         ("POST", "/v2/orders"): _fake_response(201, {"id": "order-123", "status": "accepted"}),

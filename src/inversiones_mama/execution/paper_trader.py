@@ -218,11 +218,16 @@ class PaperTradingOrchestrator:
         per_name_cap: float = MAX_WEIGHT_PER_NAME,
         rck_alpha: float = RCK_MAX_DRAWDOWN_THRESHOLD,
         rck_beta: float = RCK_MAX_DRAWDOWN_PROBABILITY,
+        max_deploy_capital: float | None = None,
     ) -> None:
         if prices_history.empty:
             raise ValueError("prices_history must be non-empty")
         if factors_history.empty:
             raise ValueError("factors_history must be non-empty")
+        if max_deploy_capital is not None and max_deploy_capital <= 0:
+            raise ValueError(
+                f"max_deploy_capital must be positive or None, got {max_deploy_capital}"
+            )
 
         self.client = client
         self.prices_history = prices_history
@@ -232,6 +237,13 @@ class PaperTradingOrchestrator:
         self.per_name_cap = float(per_name_cap)
         self.rck_alpha = float(rck_alpha)
         self.rck_beta = float(rck_beta)
+        # Optional deployment cap — when set, target weights are applied
+        # only to min(portfolio_value, max_deploy_capital). Useful when the
+        # broker seeds a paper account with more cash than the strategy's
+        # intended capital (Alpaca paper gives $100k; we care about $5k).
+        self.max_deploy_capital = (
+            float(max_deploy_capital) if max_deploy_capital is not None else None
+        )
 
     def _compute_target_weights(self) -> pd.Series:
         """Fit 6-factor + RCK on the trailing lookback and return target weights."""
@@ -306,6 +318,14 @@ class PaperTradingOrchestrator:
         if portfolio_value <= 0:
             raise ValueError(f"Non-positive portfolio value: {portfolio_value}")
 
+        # Apply the deployment cap (Alpaca paper seeds $100k; we only want
+        # to allocate the strategy's intended capital). Unallocated cash
+        # stays as cash at the broker and is untouched by the rebalance.
+        if self.max_deploy_capital is not None:
+            deployable = min(portfolio_value, self.max_deploy_capital)
+        else:
+            deployable = portfolio_value
+
         # --- Circuit-breaker gate ---
         breaker_dd: float | None = None
         if circuit_breaker is not None:
@@ -361,7 +381,10 @@ class PaperTradingOrchestrator:
             log.warning("Cost estimator failed: %s", exc)
             estimated_cost = 0.0
 
-        # Build orders: integer shares based on weight deltas at current prices
+        # Build orders: integer shares based on weight deltas at current prices.
+        # `deployable` is the cap — target weights are applied to it, not to the
+        # full portfolio_value (so Alpaca's $100k default cash doesn't force us
+        # to deploy more than the strategy's intended capital).
         trade_log = TradeLog()
         total_fill_value = 0.0
         n_orders = 0
@@ -370,7 +393,7 @@ class PaperTradingOrchestrator:
             px = latest_prices[t]
             if px is None or px <= 0:
                 continue
-            target_dollar = float(target_w[t]) * portfolio_value
+            target_dollar = float(target_w[t]) * deployable
             current_dollar = current_positions.get(t, 0) * px
             delta_dollar = target_dollar - current_dollar
             delta_shares = int(round(delta_dollar / px))
