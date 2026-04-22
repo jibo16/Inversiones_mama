@@ -28,7 +28,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-from ..backtest.engine import BacktestConfig, BacktestResult, walk_forward_backtest
+from ..backtest.engine import BacktestConfig, BacktestResult, RebalanceFailure, walk_forward_backtest
 from ..config import GATES
 from ..simulation.metrics import PerformanceMetrics, compute_all_metrics
 from ..simulation.monte_carlo import MCValidationResult, run_mc_rck_validation
@@ -77,6 +77,9 @@ class ValidationReport:
 
     # Gate verdicts
     gates: list[GateVerdict] = field(default_factory=list)
+
+    # Rebalance exceptions swallowed by the engine (surfaced for diagnosis)
+    rebalance_failures: list[RebalanceFailure] = field(default_factory=list)
 
     @property
     def all_pass(self) -> bool:
@@ -195,6 +198,7 @@ def run_full_validation(
         metrics_oos=metrics_oos,
         mc_result=mc_result,
         gates=gates,
+        rebalance_failures=engine_result.rebalance_failures,
     )
 
 

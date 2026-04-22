@@ -175,17 +175,73 @@ COVARIANCE_METHODS: tuple[str, ...] = (
 )
 
 
-def estimate_covariance(returns: pd.DataFrame, method: str = "sample") -> pd.DataFrame:
+def ensure_psd(
+    Sigma: pd.DataFrame | np.ndarray,
+    eigenvalue_floor: float = 1e-10,
+) -> pd.DataFrame:
+    """Return a symmetric PSD matrix close to ``Sigma``.
+
+    Eigendecomposes ``Sigma`` and clips any eigenvalue below
+    ``eigenvalue_floor * max(abs(eigvals))`` up to that floor. This
+    guarantees the output is strictly positive-definite even when
+    ``Sigma`` is only numerically near-PSD (which is enough to fail
+    CVXPY's ARPACK eigenvalue check on large universes).
+
+    Complexity O(N³) via ``numpy.linalg.eigh`` — trivial for N ~= 500,
+    negligible compared to the Kelly solve itself.
+    """
+    if isinstance(Sigma, pd.DataFrame):
+        index = Sigma.index
+        columns = Sigma.columns
+        S = Sigma.to_numpy(dtype=np.float64, copy=True)
+    else:
+        S = np.asarray(Sigma, dtype=np.float64)
+        index = columns = None
+
+    # Symmetrize to kill numerical asymmetry
+    S = 0.5 * (S + S.T)
+    # Eigendecomposition of a symmetric matrix
+    eigvals, eigvecs = np.linalg.eigh(S)
+    # Floor relative to the largest eigenvalue so tiny positive values survive
+    max_abs = float(np.abs(eigvals).max()) if eigvals.size else 1.0
+    floor = max(eigenvalue_floor * max_abs, eigenvalue_floor)
+    eigvals_clipped = np.maximum(eigvals, floor)
+    S_psd = (eigvecs * eigvals_clipped) @ eigvecs.T
+    # One more symmetrization for safety
+    S_psd = 0.5 * (S_psd + S_psd.T)
+
+    if index is not None:
+        return pd.DataFrame(S_psd, index=index, columns=columns)
+    return pd.DataFrame(S_psd)
+
+
+def estimate_covariance(
+    returns: pd.DataFrame,
+    method: str = "sample",
+    psd_clip: bool = True,
+) -> pd.DataFrame:
     """Return an estimated covariance matrix of ``returns`` by ``method``.
 
-    method ∈ {'sample', 'lw_diagonal', 'lw_constant_correlation'}.
+    Parameters
+    ----------
+    returns : DataFrame of returns (rows = observations).
+    method : one of ``COVARIANCE_METHODS``.
+    psd_clip : when True (default), passes the result through
+        :func:`ensure_psd` to guarantee the matrix is strictly positive
+        definite before it feeds CVXPY. Required for large universes
+        (N > ~100) where LW's theoretically-PSD output can still fail
+        ARPACK's numerical eigenvalue check.
     """
     if method == "sample":
-        return sample_covariance(returns)
-    if method == "lw_diagonal":
-        return ledoit_wolf_diagonal(returns)[0]
-    if method == "lw_constant_correlation":
-        return ledoit_wolf_constant_correlation(returns)[0]
-    raise ValueError(
-        f"Unknown covariance method: {method!r}. Choose one of {COVARIANCE_METHODS}."
-    )
+        Sigma = sample_covariance(returns)
+    elif method == "lw_diagonal":
+        Sigma = ledoit_wolf_diagonal(returns)[0]
+    elif method == "lw_constant_correlation":
+        Sigma = ledoit_wolf_constant_correlation(returns)[0]
+    else:
+        raise ValueError(
+            f"Unknown covariance method: {method!r}. Choose one of {COVARIANCE_METHODS}."
+        )
+    if psd_clip:
+        Sigma = ensure_psd(Sigma)
+    return Sigma

@@ -257,9 +257,16 @@ def solve_rck(
     # --- CVXPY problem formulation ------------------------------------------
     w = cp.Variable(n_pos, nonneg=True)
 
+    # Wrap Sigma_pos in cp.psd_wrap so CVXPY skips its internal ARPACK
+    # eigenvalue check. We already PSD-regularized above and the caller is
+    # expected to pass a PSD-clipped covariance for large universes. Without
+    # this, N > ~200 causes "ArpackNoConvergence" failures on otherwise-valid
+    # problems (observed on SP500 scale).
+    Sigma_psd = cp.psd_wrap(Sigma_pos)
+
     # Objective: maximize g(w) = w'μ − ½ w'Σw
     # CVXPY convention: minimize -(w'μ) + ½ w'Σw
-    objective = cp.Minimize(-mu_pos @ w + 0.5 * cp.quad_form(w, Sigma_pos))
+    objective = cp.Minimize(-mu_pos @ w + 0.5 * cp.quad_form(w, Sigma_psd))
 
     constraints = [
         w >= min_weight,      # lower bound
@@ -274,7 +281,7 @@ def solve_rck(
     #     w'Σw ≤ (2/λ) * w'μ
     # which is convex when w'μ ≥ 0 (guaranteed by mu pruning + nonneg w).
     constraints.append(
-        cp.quad_form(w, Sigma_pos) <= (2.0 / lambda_rck) * (mu_pos @ w)
+        cp.quad_form(w, Sigma_psd) <= (2.0 / lambda_rck) * (mu_pos @ w)
     )
 
     prob = cp.Problem(objective, constraints)

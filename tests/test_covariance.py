@@ -8,6 +8,7 @@ import pytest
 
 from inversiones_mama.models.covariance import (
     COVARIANCE_METHODS,
+    ensure_psd,
     estimate_covariance,
     ledoit_wolf_constant_correlation,
     ledoit_wolf_diagonal,
@@ -204,6 +205,64 @@ def test_drops_rows_with_nans():
     # Estimator should succeed; result well-defined
     assert cov.shape == (2, 2)
     assert np.isfinite(cov.to_numpy()).all()
+
+
+# --------------------------------------------------------------------------- #
+# ensure_psd                                                                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_ensure_psd_leaves_psd_matrices_near_unchanged():
+    rng = np.random.default_rng(100)
+    n = 10
+    A = rng.normal(0, 1, (n, n))
+    S = A @ A.T  # guaranteed PSD
+    S_df = pd.DataFrame(S, index=[f"a{i}" for i in range(n)], columns=[f"a{i}" for i in range(n)])
+    out = ensure_psd(S_df)
+    # Small change in eigenvalues but same overall structure
+    np.testing.assert_allclose(out.to_numpy(), S, atol=1e-8)
+
+
+def test_ensure_psd_lifts_negative_eigenvalues():
+    """A matrix with slightly negative eigenvalues should come out strictly positive."""
+    # Construct a diagonal with one mildly negative eigenvalue
+    S = np.diag([1.0, 0.5, -1e-4, 0.3])
+    out = ensure_psd(pd.DataFrame(S), eigenvalue_floor=1e-6)
+    eigvals = np.linalg.eigvalsh(out.to_numpy())
+    assert (eigvals > 0).all()
+
+
+def test_ensure_psd_preserves_labels():
+    rng = np.random.default_rng(101)
+    n = 6
+    A = rng.normal(0, 1, (n, n))
+    cols = [f"t{i}" for i in range(n)]
+    S = pd.DataFrame(A @ A.T, index=cols, columns=cols)
+    out = ensure_psd(S)
+    assert list(out.columns) == cols
+    assert list(out.index) == cols
+
+
+def test_ensure_psd_handles_numpy_input():
+    rng = np.random.default_rng(102)
+    S = rng.normal(0, 1, (5, 5))
+    S = S @ S.T
+    out = ensure_psd(S)
+    assert isinstance(out, pd.DataFrame)
+    assert out.shape == (5, 5)
+
+
+def test_estimate_covariance_applies_psd_clip_by_default(wide_returns):
+    """After the change, the dispatcher should produce a strictly PSD result."""
+    Sigma = estimate_covariance(wide_returns, method="lw_diagonal")
+    eigvals = np.linalg.eigvalsh(Sigma.to_numpy())
+    assert eigvals.min() > 0
+
+
+def test_estimate_covariance_opt_out_of_psd_clip(small_returns):
+    a = estimate_covariance(small_returns, method="sample", psd_clip=False)
+    b = sample_covariance(small_returns)
+    pd.testing.assert_frame_equal(a, b)
 
 
 def test_identical_assets_produce_singular_sample_but_lw_invertible():

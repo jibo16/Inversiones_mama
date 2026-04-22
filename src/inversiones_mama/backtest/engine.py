@@ -95,6 +95,22 @@ class RebalanceRecord:
 
 
 @dataclass(frozen=True)
+class RebalanceFailure:
+    """Recorded exception from a rebalance attempt that the engine swallowed.
+
+    Populated when fit_factor_loadings / covariance estimation / RCK solve
+    throws. The engine moves on (holds previous weights) so a bad day
+    doesn't crash the backtest, but the failure is surfaced here so
+    callers can diagnose and remedy.
+    """
+
+    date: pd.Timestamp
+    error_type: str
+    error_message: str
+    stage: str   # "factor_regression" | "premia" | "mu" | "covariance" | "kelly" | "cost" | "unknown"
+
+
+@dataclass(frozen=True)
 class BacktestResult:
     """Output of :func:`walk_forward_backtest`."""
 
@@ -103,6 +119,7 @@ class BacktestResult:
     wealth: pd.Series              # $ value of the portfolio by day
     weights_history: pd.DataFrame  # target weights at each rebalance date
     rebalance_records: list[RebalanceRecord] = field(default_factory=list)
+    rebalance_failures: list[RebalanceFailure] = field(default_factory=list)
 
     @property
     def final_wealth(self) -> float:
@@ -220,6 +237,7 @@ def walk_forward_backtest(
     return_records: dict[pd.Timestamp, float] = {}
     weights_history: dict[pd.Timestamp, np.ndarray] = {}
     rebalance_records: list[RebalanceRecord] = []
+    rebalance_failures: list[RebalanceFailure] = []
 
     dates_arr = returns.index
     returns_arr = returns.to_numpy(dtype=np.float64)
@@ -241,14 +259,19 @@ def walk_forward_backtest(
             train_returns = returns.iloc[t - lb + 1 : t + 1]
             train_factors = factors_al.iloc[t - lb + 1 : t + 1]
 
+            stage = "unknown"
             try:
+                stage = "factor_regression"
                 loadings = fit_factor_loadings(train_returns, train_factors)
+                stage = "premia"
                 premia = factor_premia(train_factors, lookback_days=lb)
+                stage = "mu"
                 mu = compute_composite_mu(loadings, premia).reindex(tickers).fillna(0.0)
+                stage = "covariance"
                 Sigma = estimate_covariance(
                     train_returns, method=config.covariance_method
                 ).reindex(index=tickers, columns=tickers)
-
+                stage = "kelly"
                 result = solve_rck(
                     mu,
                     Sigma,
@@ -258,7 +281,14 @@ def walk_forward_backtest(
                     beta=config.rck_beta,
                 )
             except Exception as exc:  # noqa: BLE001 - we want to continue on any solver failure
-                log.warning("RCK fit/solve failed at %s: %s; holding current weights.", date, exc)
+                log.warning("RCK fit/solve failed at %s in stage=%s: %s; holding current weights.",
+                            date, stage, exc)
+                rebalance_failures.append(RebalanceFailure(
+                    date=pd.Timestamp(date),
+                    error_type=type(exc).__name__,
+                    error_message=str(exc)[:300],
+                    stage=stage,
+                ))
                 continue
 
             target_w = result.weights.reindex(tickers).fillna(0.0)
@@ -321,4 +351,5 @@ def walk_forward_backtest(
         wealth=wealth_series,
         weights_history=weights_df,
         rebalance_records=rebalance_records,
+        rebalance_failures=rebalance_failures,
     )

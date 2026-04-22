@@ -181,6 +181,18 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print(text)
 
+    # Diagnose swallowed failures — crucial for large universes where some
+    # rebalances silently fail and distort the realized wealth path.
+    if report.rebalance_failures:
+        from collections import Counter
+        print(f"\n[DIAGNOSTICS] {len(report.rebalance_failures)} rebalance(s) failed:")
+        by_stage = Counter(f.stage for f in report.rebalance_failures)
+        for stage, count in by_stage.most_common():
+            print(f"  stage={stage:20s} count={count}")
+        print("  first 5 failures:")
+        for f in report.rebalance_failures[:5]:
+            print(f"    {f.date.date()} [{f.stage}] {f.error_type}: {f.error_message[:120]}")
+
     # Persist
     out = Path(args.out) if args.out else Path("results") / f"{universe_name}_verdict.txt"
     out.parent.mkdir(parents=True, exist_ok=True)
