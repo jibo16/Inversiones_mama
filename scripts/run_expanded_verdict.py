@@ -45,12 +45,21 @@ from inversiones_mama.data.prices import load_prices
 from inversiones_mama.validation.gates import render_report, run_full_validation
 
 
-UNIVERSES: dict[str, list[str]] = {
-    "v1a":       ["AVUV", "AVDV", "AVEM", "MTUM", "IMTM", "USMV", "GLD", "DBC", "TLT", "SPY"],
-    "etfs":      list(LIQUID_ETFS),
-    "sp100":     list(SP100_CORE),
-    "nasdaq100": list(NASDAQ100_CORE),
-    "all":       all_curated_tickers(),
+def _sp500_tickers() -> list[str]:
+    """Lazy SP500 fetch so the script doesn't make a network call at import."""
+    from inversiones_mama.data.liquid_universe import fetch_sp500_tickers  # noqa: PLC0415
+
+    return list(fetch_sp500_tickers())
+
+
+UNIVERSES: dict[str, list[str] | None] = {
+    "v1a":              ["AVUV", "AVDV", "AVEM", "MTUM", "IMTM", "USMV", "GLD", "DBC", "TLT", "SPY"],
+    "etfs":             list(LIQUID_ETFS),
+    "sp100":            list(SP100_CORE),
+    "nasdaq100":        list(NASDAQ100_CORE),
+    "all":              all_curated_tickers(),
+    "sp500":            None,  # fetched lazily by _sp500_tickers()
+    "sp500_plus_etfs":  None,
 }
 
 
@@ -97,7 +106,12 @@ def main(argv: list[str] | None = None) -> int:
         tickers = tickers_override
         universe_name = f"custom_{len(tickers)}"
     else:
-        tickers = UNIVERSES[args.universe]
+        if args.universe == "sp500":
+            tickers = _sp500_tickers()
+        elif args.universe == "sp500_plus_etfs":
+            tickers = sorted(set(_sp500_tickers()) | set(LIQUID_ETFS))
+        else:
+            tickers = UNIVERSES[args.universe] or []
         universe_name = args.universe
 
     end = datetime.today() - timedelta(days=1)

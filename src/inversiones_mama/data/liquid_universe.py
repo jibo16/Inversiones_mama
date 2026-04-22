@@ -118,13 +118,17 @@ def build_liquid_universe(
 
     Parameters
     ----------
-    kind : ``"sp100"``, ``"nasdaq100"``, ``"etfs"``, or ``"all"``.
+    kind : ``"sp100"``, ``"nasdaq100"``, ``"etfs"``, ``"all"``,
+           ``"sp500"`` (runtime Wikipedia scrape), or
+           ``"sp500_plus_etfs"`` (SP500 ∪ LIQUID_ETFS).
     limit : optional cap on the number of tickers (first N after sort).
 
     Raises
     ------
     ValueError
         If ``kind`` is unknown.
+    RuntimeError
+        If ``kind`` needs a network scrape and both sources fail.
     """
     kind = kind.lower()
     if kind == "sp100":
@@ -135,8 +139,15 @@ def build_liquid_universe(
         tickers = _unique_sorted(LIQUID_ETFS)
     elif kind == "all":
         tickers = _unique_sorted(SP100_CORE + NASDAQ100_CORE + LIQUID_ETFS)
+    elif kind == "sp500":
+        tickers = fetch_sp500_tickers()
+    elif kind == "sp500_plus_etfs":
+        tickers = _unique_sorted(fetch_sp500_tickers() + LIQUID_ETFS)
     else:
-        raise ValueError(f"Unknown kind: {kind!r}. Choose sp100 / nasdaq100 / etfs / all.")
+        raise ValueError(
+            f"Unknown kind: {kind!r}. Choose sp100 / nasdaq100 / etfs / all / "
+            "sp500 / sp500_plus_etfs."
+        )
 
     if limit is not None:
         if limit <= 0:
@@ -190,3 +201,64 @@ def top_k_by_volume(
 def all_curated_tickers() -> list[str]:
     """Flat de-duplicated list of every ticker in any curated set."""
     return list(_unique_sorted(SP100_CORE + NASDAQ100_CORE + LIQUID_ETFS))
+
+
+# --------------------------------------------------------------------------- #
+# Runtime scrapers for larger indices                                         #
+# --------------------------------------------------------------------------- #
+
+
+_SP500_WIKIPEDIA_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+_SP500_FALLBACK_CSV = (
+    "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/"
+    "data/constituents.csv"
+)
+
+
+def fetch_sp500_tickers(timeout: float = 15.0) -> tuple[str, ...]:
+    """Scrape the current S&P 500 constituents.
+
+    Tries two free public sources in order:
+      1. Wikipedia's ``List_of_S%26P_500_companies`` page (first table).
+      2. The datasets.io github mirror (CSV snapshot).
+
+    Returns a sorted tuple of deduplicated tickers. Raises ``RuntimeError``
+    if both fetches fail. Typical return is ~500 tickers.
+
+    Not cached — callers should cache the result locally.
+    """
+    import io
+
+    import requests
+
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; inversiones-mama/0.1; research)"}
+
+    # Try Wikipedia first via pandas.read_html
+    try:
+        import pandas as pd  # noqa: PLC0415
+
+        tables = pd.read_html(_SP500_WIKIPEDIA_URL, attrs={"id": "constituents"})
+        if tables:
+            df = tables[0]
+            col = next((c for c in df.columns if str(c).lower() in ("symbol", "ticker")), None)
+            if col is not None:
+                tickers = [str(t).replace(".", "-").upper().strip() for t in df[col].tolist()]
+                return _unique_sorted(tuple(t for t in tickers if t))
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Fallback: github CSV
+    try:
+        resp = requests.get(_SP500_FALLBACK_CSV, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        import csv
+
+        reader = csv.DictReader(io.StringIO(resp.text))
+        tickers = [str(row.get("Symbol", "")).replace(".", "-").upper().strip()
+                   for row in reader]
+        return _unique_sorted(tuple(t for t in tickers if t))
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "Could not fetch S&P 500 constituents from either Wikipedia or "
+            f"the datasets.io github mirror: {exc}"
+        ) from exc

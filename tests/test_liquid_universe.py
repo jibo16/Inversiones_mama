@@ -122,6 +122,39 @@ def test_build_universe_bad_kind_raises():
         build_liquid_universe("made_up_kind")
 
 
+def test_build_universe_error_lists_sp500_option():
+    """The error message mentions sp500 now that we support it."""
+    with pytest.raises(ValueError, match="sp500"):
+        build_liquid_universe("made_up_kind")
+
+
+def test_build_universe_sp500_uses_scraper(monkeypatch):
+    """When kind='sp500' is requested, the runtime scraper is called."""
+    from inversiones_mama.data import liquid_universe as lu
+
+    called = {"count": 0}
+
+    def fake_scraper(timeout=15.0):
+        called["count"] += 1
+        return ("AAPL", "MSFT", "NVDA", "JPM", "BAC")
+
+    monkeypatch.setattr(lu, "fetch_sp500_tickers", fake_scraper)
+    u = lu.build_liquid_universe("sp500")
+    assert called["count"] == 1
+    assert u.all_tickers() == ["AAPL", "BAC", "JPM", "MSFT", "NVDA"]
+
+
+def test_build_universe_sp500_plus_etfs(monkeypatch):
+    from inversiones_mama.data import liquid_universe as lu
+
+    monkeypatch.setattr(lu, "fetch_sp500_tickers", lambda timeout=15.0: ("AAPL", "MSFT"))
+    u = lu.build_liquid_universe("sp500_plus_etfs")
+    tickers = set(u.all_tickers())
+    assert "AAPL" in tickers
+    assert "MSFT" in tickers
+    assert "SPY" in tickers  # from LIQUID_ETFS
+
+
 def test_build_universe_case_insensitive_kind():
     assert len(build_liquid_universe("SP100")) == len(build_liquid_universe("sp100"))
 
