@@ -23,7 +23,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ibkr = ["ib_insync>=0.9.86"]
+ibkr = [
+    "ib_insync>=0.9.86",
+    "websocket-client>=1.8",
+]
+dashboard = [
+    "streamlit>=1.40",
+    "plotly>=5.20",
+]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
