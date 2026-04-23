@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -35,6 +36,17 @@ import numpy as np
 
 from inversiones_mama.backtest.engine import BacktestConfig
 from inversiones_mama.data.factors import load_factor_returns
+
+
+def _git_short_hash() -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short=8", "HEAD"],
+            stderr=subprocess.DEVNULL, timeout=5,
+        ).decode().strip()
+        return out or "unknown"
+    except Exception:  # noqa: BLE001
+        return "unknown"
 from inversiones_mama.data.liquid_universe import (
     LIQUID_ETFS,
     NASDAQ100_CORE,
@@ -193,11 +205,26 @@ def main(argv: list[str] | None = None) -> int:
         for f in report.rebalance_failures[:5]:
             print(f"    {f.date.date()} [{f.stage}] {f.error_type}: {f.error_message[:120]}")
 
-    # Persist
-    out = Path(args.out) if args.out else Path("results") / f"{universe_name}_verdict.txt"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text + "\n", encoding="utf-8")
-    print(f"\nSaved -> {out}")
+    # Persist to canonical + archive (immutable evidence). Use git short-hash
+    # + timestamp so re-runs append rather than overwrite the evidence trail.
+    archive_dir = Path("results/archive")
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    git_hash = _git_short_hash()
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    canonical = Path(args.out) if args.out else Path("results") / f"{universe_name}_verdict.txt"
+    archive_path = archive_dir / f"{universe_name}_verdict_{stamp}_{git_hash}.txt"
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        f"# timestamp:  {datetime.now().isoformat(timespec='seconds')}\n"
+        f"# git_hash:   {git_hash}\n"
+        f"# universe:   {universe_name} ({prices.shape[1]} tickers)\n"
+        f"# archive:    {archive_path}\n"
+        "\n"
+    )
+    canonical.write_text(header + text + "\n", encoding="utf-8")
+    archive_path.write_text(header + text + "\n", encoding="utf-8")
+    print(f"\nSaved -> {canonical}")
+    print(f"Archive -> {archive_path}")
 
     return 0 if report.all_pass else 1
 

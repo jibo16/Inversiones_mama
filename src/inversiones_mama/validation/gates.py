@@ -229,7 +229,7 @@ def _evaluate_gates(
         )
     )
 
-    # --- OOS Sharpe gate ---
+    # --- OOS Sharpe gate (legacy: any positive OOS Sharpe) ---
     oos_sharpe = metrics_oos.sharpe_ratio if metrics_oos is not None else metrics_full.sharpe_ratio
     gates.append(
         GateVerdict(
@@ -241,6 +241,72 @@ def _evaluate_gates(
             comparator=">",
         )
     )
+
+    # --- OOS Deflated Sharpe gate (Bailey-Lopez de Prado bar) ----------------
+    # DSR corrects Sharpe for multiple testing and non-normal returns. A DSR
+    # >= 0.95 means the observed Sharpe is 95% probable to reflect real edge.
+    # This is the institutional bar; the previous oos_sharpe_positive gate
+    # accepted any noise above zero.
+    oos_dsr = metrics_oos.deflated_sharpe if metrics_oos is not None else metrics_full.deflated_sharpe
+    gates.append(
+        GateVerdict(
+            name="oos_deflated_sharpe",
+            observed=float(oos_dsr),
+            threshold=GATES.min_oos_dsr,
+            passed=bool(oos_dsr >= GATES.min_oos_dsr),
+            description=(
+                f"OOS Deflated Sharpe >= {GATES.min_oos_dsr} "
+                f"(Bailey-Lopez de Prado 95% institutional bar)"
+            ),
+            comparator=">=",
+        )
+    )
+
+    # --- IS/OOS Sharpe-divergence sanity gate --------------------------------
+    # Flags regime-dependent luck: if OOS Sharpe beats IS Sharpe by more than
+    # the threshold annualised, the strategy almost certainly rode a regime
+    # that happened to line up with the held-out period.
+    if metrics_is is not None and metrics_oos is not None:
+        divergence = float(metrics_oos.sharpe_ratio - metrics_is.sharpe_ratio)
+        gates.append(
+            GateVerdict(
+                name="oos_vs_is_sharpe_divergence",
+                observed=divergence,
+                threshold=GATES.max_oos_is_sharpe_divergence,
+                passed=bool(divergence <= GATES.max_oos_is_sharpe_divergence),
+                description=(
+                    f"OOS Sharpe - IS Sharpe <= {GATES.max_oos_is_sharpe_divergence} "
+                    f"(guards against regime-dependent lucky OOS)"
+                ),
+                comparator="<=",
+            )
+        )
+
+    # --- Monthly return sanity gate ------------------------------------------
+    # Flags single-month jackpots. Any calendar month whose absolute return
+    # exceeds N*monthly-vol indicates the realised Sharpe is being carried
+    # by one or two lucky months, not by durable edge.
+    daily = engine_result.daily_returns.dropna()
+    if len(daily) >= 30:
+        monthly = (1.0 + daily).resample("ME").prod() - 1.0
+        monthly = monthly.dropna()
+        if len(monthly) >= 6 and monthly.std(ddof=1) > 0:
+            max_abs = float(monthly.abs().max())
+            monthly_vol = float(monthly.std(ddof=1))
+            sigma_ratio = max_abs / monthly_vol
+            gates.append(
+                GateVerdict(
+                    name="max_monthly_return_sigma",
+                    observed=float(sigma_ratio),
+                    threshold=GATES.max_monthly_return_sigma,
+                    passed=bool(sigma_ratio <= GATES.max_monthly_return_sigma),
+                    description=(
+                        f"max|monthly return| / monthly vol <= {GATES.max_monthly_return_sigma}"
+                        f"  (caps single-month jackpots)"
+                    ),
+                    comparator="<=",
+                )
+            )
 
     # --- Monte Carlo gates (only if MC ran) ---
     if mc_result is not None:

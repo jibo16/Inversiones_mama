@@ -16,6 +16,7 @@ This is the canonical "does v1a ship?" command. It runs the full pipeline:
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from datetime import datetime, timedelta
 
@@ -25,6 +26,17 @@ from inversiones_mama.config import UNIVERSE
 from inversiones_mama.data.factors import load_factor_returns
 from inversiones_mama.data.prices import load_prices
 from inversiones_mama.validation.gates import render_report, run_full_validation
+
+
+def _git_short_hash() -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short=8", "HEAD"],
+            stderr=subprocess.DEVNULL, timeout=5,
+        ).decode().strip()
+        return out or "unknown"
+    except Exception:  # noqa: BLE001
+        return "unknown"
 
 
 def main() -> int:
@@ -57,11 +69,29 @@ def main() -> int:
     print()
     print(out)
 
-    # Persist to results/
+    # Persist to results/ with canonical + timestamped archive copy. The
+    # archive is the immutable evidence; the canonical is the convenience
+    # pointer. Never overwrite archive files.
     os.makedirs("results", exist_ok=True)
-    with open("results/v1a_verdict.txt", "w", encoding="utf-8") as fh:
-        fh.write(out + "\n")
-    print("\nSaved -> results/v1a_verdict.txt")
+    os.makedirs("results/archive", exist_ok=True)
+    git_hash = _git_short_hash()
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    archive_path = f"results/archive/v1a_verdict_{stamp}_{git_hash}.txt"
+    canonical_path = "results/v1a_verdict.txt"
+    # Prepend evidence header to both
+    header = (
+        f"# timestamp:  {datetime.now().isoformat(timespec='seconds')}\n"
+        f"# git_hash:   {git_hash}\n"
+        f"# universe:   v1a (10 ETFs)\n"
+        f"# archive:    {archive_path}\n"
+        "\n"
+    )
+    with open(archive_path, "w", encoding="utf-8") as fh:
+        fh.write(header + out + "\n")
+    with open(canonical_path, "w", encoding="utf-8") as fh:
+        fh.write(header + out + "\n")
+    print(f"\nSaved -> {canonical_path}")
+    print(f"Archive -> {archive_path}")
 
     return 0 if report.all_pass else 1
 

@@ -114,5 +114,31 @@ class SanityGates:
     # Cost leakage
     max_annual_turnover_cost: float = 0.015  # annual commissions+slippage < 1.5% capital
 
+    # --- Overfit guards added 2026-04-22 after forensic audit ----------------
+    # These three gates are intentionally strict. They structurally prevent
+    # the "SP500 +775%" class of overfit artifacts from passing the verdict:
+    #
+    #  * min_oos_dsr=0.95 is the Bailey-Lopez de Prado institutional bar.
+    #    An OOS Deflated Sharpe >= 0.95 means the observed OOS Sharpe is
+    #    95% likely to reflect real edge after multiple-testing deflation
+    #    AND non-normal return correction. The prior oos_sharpe_positive
+    #    gate (>0) was trivially passed by any noisy positive backtest.
+    #
+    #  * max_oos_is_sharpe_divergence=2.0 catches regime dependency. If OOS
+    #    Sharpe beats IS Sharpe by more than 2.0 annualised, the strategy
+    #    is almost certainly riding a regime that happened to line up with
+    #    the held-out period -- not "surviving" an OOS test. The SP500
+    #    strategy had IS=0.18, OOS=2.19 (divergence=2.01); v1a had
+    #    IS=-0.55, OOS=1.49 (divergence=2.04). Both flagged.
+    #
+    #  * max_monthly_return_sigma=3.0 catches single-month jackpots. If any
+    #    calendar-month return exceeds 3 standard deviations of the monthly
+    #    vol, the "Sharpe" is being carried by one or two lucky months, not
+    #    a durable signal. The SP500 strategy had +38.1% month on ~8%
+    #    monthly vol -> ~4.8 sigma -> flagged.
+    min_oos_dsr: float = 0.95
+    max_oos_is_sharpe_divergence: float = 2.0
+    max_monthly_return_sigma: float = 3.0
+
 
 GATES: SanityGates = SanityGates()
