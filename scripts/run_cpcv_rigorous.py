@@ -370,6 +370,25 @@ def _null_spy(prices: pd.DataFrame, factors: pd.DataFrame) -> pd.Series:
     return returns[tick].dropna()
 
 
+def _null_invvol_eqfloor(prices: pd.DataFrame, factors: pd.DataFrame) -> pd.Series:
+    """Inverse-vol with 15% per-name cap + 40% equity floor.
+
+    Uses the production ``inverse_vol_allocator`` (sizing/inverse_vol.py)
+    with the exact same parameters as ``generate_current_weights`` —
+    ensuring tournament results match deployment behavior exactly.
+    """
+    from inversiones_mama.sizing.inverse_vol import inverse_vol_allocator  # noqa: PLC0415
+
+    _, port_ret = inverse_vol_allocator(
+        prices,
+        vol_lookback=60,
+        rebal_freq="ME",
+        per_name_cap=0.15,
+        equity_floor=0.40,
+    )
+    return port_ret
+
+
 @dataclass(frozen=True)
 class StrategySpec:
     name: str
@@ -405,6 +424,8 @@ def _build_strategy_specs() -> list[StrategySpec]:
         StrategySpec("null_hrp",             _null_hrp,             is_null=True),
         StrategySpec("null_hrp_capped",      _null_hrp_capped,      is_null=True),
         StrategySpec("null_hrp_eqfloor",     _null_hrp_equity_floor, is_null=True),
+        # Null baselines — inverse-vol with equity floor (production allocator)
+        StrategySpec("null_invvol_eqfloor",  _null_invvol_eqfloor,  is_null=True),
         # Null baselines — classic benchmarks
         StrategySpec("null_60_40",           _null_60_40,           is_null=True),
         StrategySpec("null_spy",             _null_spy,             is_null=True),
