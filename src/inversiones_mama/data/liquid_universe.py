@@ -143,6 +143,12 @@ def build_liquid_universe(
         tickers = fetch_sp500_tickers()
     elif kind == "sp500_plus_etfs":
         tickers = _unique_sorted(fetch_sp500_tickers() + LIQUID_ETFS)
+    elif kind == "russell3000":
+        tickers = fetch_russell3000_tickers()
+    elif kind == "wide":
+        tickers = _unique_sorted(
+            fetch_russell3000_tickers() + fetch_sp500_tickers() + LIQUID_ETFS
+        )
     else:
         raise ValueError(
             f"Unknown kind: {kind!r}. Choose sp100 / nasdaq100 / etfs / all / "
@@ -213,6 +219,59 @@ _SP500_FALLBACK_CSV = (
     "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/"
     "data/constituents.csv"
 )
+# iShares Russell 3000 ETF (IWV) holdings CSV. Free, no auth, 2500+ tickers.
+# Stable URL as of 2026.
+_IWV_HOLDINGS_CSV = (
+    "https://www.ishares.com/us/products/239714/ishares-russell-3000-etf/"
+    "1467271812596.ajax?fileType=csv&fileName=IWV_holdings&dataType=fund"
+)
+
+
+def fetch_russell3000_tickers(timeout: float = 30.0) -> tuple[str, ...]:
+    """Scrape the current Russell 3000 constituents via iShares IWV holdings CSV.
+
+    Returns equity-class tickers only (drops the cash/synthetic `-` rows).
+    Typical return is ~2400-2600 tickers (IWV samples; not perfect replication).
+
+    Not cached on disk -- callers should cache the result locally.
+    Raises RuntimeError on any network or parse failure.
+    """
+    import csv
+    import io
+
+    import requests
+
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; inversiones-mama/0.1; research)"}
+    try:
+        resp = requests.get(_IWV_HOLDINGS_CSV, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"iShares IWV fetch failed: {exc}") from exc
+
+    lines = resp.text.splitlines()
+    header_idx: int | None = None
+    for i, ln in enumerate(lines[:25]):
+        if ln.startswith("Ticker"):
+            header_idx = i
+            break
+    if header_idx is None:
+        raise RuntimeError("Could not locate header row in IWV holdings CSV")
+
+    reader = csv.DictReader(io.StringIO("\n".join(lines[header_idx:])))
+    tickers: list[str] = []
+    for row in reader:
+        t = (row.get("Ticker") or "").strip().upper().replace(".", "-")
+        asset_class = (row.get("Asset Class") or "").strip()
+        # Skip cash/synthetic rows (ticker "-") and non-equity asset classes.
+        if not t or t == "-":
+            continue
+        if asset_class and asset_class != "Equity":
+            continue
+        tickers.append(t)
+
+    if not tickers:
+        raise RuntimeError("iShares IWV CSV parsed to zero equity tickers")
+    return _unique_sorted(tuple(tickers))
 
 
 def fetch_sp500_tickers(timeout: float = 15.0) -> tuple[str, ...]:
