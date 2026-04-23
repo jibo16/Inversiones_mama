@@ -519,7 +519,10 @@ def run_rigorous(
     from scipy.stats import mannwhitneyu  # lazy
 
     mw_rows: list[dict] = []
-    for universe_name in universes:
+    # Iterate over the universes actually run, not the CLI arg (which may be
+    # shadowed when --prices-parquet overrides the universe fetchers).
+    actual_universes = sorted(splits_df["universe"].unique().tolist())
+    for universe_name in actual_universes:
         # Pool null sharpes across all null strategies on this universe
         null_mask = (splits_df["universe"] == universe_name) & (splits_df["is_null"])
         null_sharpes = splits_df.loc[null_mask, "sharpe"].dropna().to_numpy()
