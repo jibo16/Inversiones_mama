@@ -206,6 +206,170 @@ def _null_hrp(prices: pd.DataFrame, factors: pd.DataFrame) -> pd.Series:
     return pd.Series(port_ret, index=returns.index, name="daily_return").dropna()
 
 
+def _null_hrp_capped(prices: pd.DataFrame, factors: pd.DataFrame) -> pd.Series:
+    """HRP with a 15% per-name cap (excess redistributed pro-rata).
+
+    Prevents HRP from concentrating >15% in any single ticker (the SHY
+    problem on ETF universes).
+    """
+    from inversiones_mama.sizing.hrp import hrp_weights  # noqa: PLC0415
+
+    PER_NAME_CAP = 0.15
+    returns = prices.pct_change().iloc[1:]
+    rebal_dates = set(returns.groupby(pd.Grouper(freq="ME")).tail(1).index.tolist())
+    weights = pd.DataFrame(0.0, index=returns.index, columns=returns.columns)
+    current_w = pd.Series(1.0 / returns.shape[1], index=returns.columns)
+    lookback = 252
+    for i, d in enumerate(returns.index):
+        if d in rebal_dates and i >= lookback:
+            window = returns.iloc[i - lookback:i]
+            active = window.dropna(axis=1, how="any")
+            var = active.var()
+            active = active[var[var > 0].index]
+            if active.shape[1] >= 2:
+                try:
+                    w = hrp_weights(active)
+                    # Apply per-name cap iteratively
+                    for _ in range(10):
+                        excess_mask = w > PER_NAME_CAP
+                        if not excess_mask.any():
+                            break
+                        excess = (w[excess_mask] - PER_NAME_CAP).sum()
+                        w[excess_mask] = PER_NAME_CAP
+                        below = w[~excess_mask]
+                        if below.sum() > 0:
+                            w[~excess_mask] += excess * below / below.sum()
+                    current_w = w.reindex(weights.columns).fillna(0.0)
+                    total = current_w.sum()
+                    if total > 0:
+                        current_w = current_w / total
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  [hrp-cap-warn] {d.date()}: {exc}")
+        weights.loc[d] = current_w.values
+    port_ret = (weights.values * returns.values).sum(axis=1)
+    return pd.Series(port_ret, index=returns.index, name="daily_return").dropna()
+
+
+# Known non-equity tickers used for asset-class classification.
+_BOND_TICKERS = frozenset({
+    "SHY", "SHV", "BIL", "IEF", "IEI", "TLT", "GOVT", "TIP", "VTIP",
+    "AGG", "BND", "LQD", "VCIT", "VCSH", "HYG", "JNK", "USHY", "FLOT",
+    "MUB", "SUB", "BNDX", "IAGG", "EMB", "PCY", "SCHR", "SCHO", "SCHZ",
+    "VGSH", "VGIT", "VGLT",
+})
+_GOLD_TICKERS = frozenset({
+    "GLD", "IAU", "GLDM", "SLV", "PPLT", "SGOL", "AAAU", "GDX", "GDXJ",
+})
+_COMMODITY_TICKERS = frozenset({
+    "DBC", "PDBC", "GSG", "USO", "UNG", "BNO", "DBA", "CORN",
+})
+_NON_EQUITY_TICKERS = _BOND_TICKERS | _GOLD_TICKERS | _COMMODITY_TICKERS
+
+
+def _null_hrp_equity_floor(prices: pd.DataFrame, factors: pd.DataFrame) -> pd.Series:
+    """HRP with 15% per-name cap + 40% equity floor.
+
+    After computing HRP weights and applying the per-name cap, rescale
+    so equities receive at least 40% of total weight. This prevents HRP
+    from degenerating to a bond/money-market fund.
+    """
+    from inversiones_mama.sizing.hrp import hrp_weights  # noqa: PLC0415
+
+    PER_NAME_CAP = 0.15
+    EQUITY_FLOOR = 0.40
+    returns = prices.pct_change().iloc[1:]
+    rebal_dates = set(returns.groupby(pd.Grouper(freq="ME")).tail(1).index.tolist())
+    weights = pd.DataFrame(0.0, index=returns.index, columns=returns.columns)
+    current_w = pd.Series(1.0 / returns.shape[1], index=returns.columns)
+    lookback = 252
+    for i, d in enumerate(returns.index):
+        if d in rebal_dates and i >= lookback:
+            window = returns.iloc[i - lookback:i]
+            active = window.dropna(axis=1, how="any")
+            var = active.var()
+            active = active[var[var > 0].index]
+            if active.shape[1] >= 2:
+                try:
+                    w = hrp_weights(active)
+                    # 1) Per-name cap
+                    for _ in range(10):
+                        excess_mask = w > PER_NAME_CAP
+                        if not excess_mask.any():
+                            break
+                        excess = (w[excess_mask] - PER_NAME_CAP).sum()
+                        w[excess_mask] = PER_NAME_CAP
+                        below = w[~excess_mask]
+                        if below.sum() > 0:
+                            w[~excess_mask] += excess * below / below.sum()
+                    # 2) Equity floor enforcement
+                    is_equity = ~w.index.isin(_NON_EQUITY_TICKERS)
+                    equity_w = w[is_equity].sum()
+                    if equity_w < EQUITY_FLOOR and is_equity.any():
+                        # Scale equities up, non-equities down
+                        non_eq_w = w[~is_equity].sum()
+                        if non_eq_w > 0 and equity_w > 0:
+                            eq_scale = EQUITY_FLOOR / equity_w
+                            neq_scale = (1.0 - EQUITY_FLOOR) / non_eq_w
+                            w[is_equity] *= eq_scale
+                            w[~is_equity] *= neq_scale
+                    current_w = w.reindex(weights.columns).fillna(0.0)
+                    total = current_w.sum()
+                    if total > 0:
+                        current_w = current_w / total
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  [hrp-eqfloor-warn] {d.date()}: {exc}")
+        weights.loc[d] = current_w.values
+    port_ret = (weights.values * returns.values).sum(axis=1)
+    return pd.Series(port_ret, index=returns.index, name="daily_return").dropna()
+
+
+def _null_60_40(prices: pd.DataFrame, factors: pd.DataFrame) -> pd.Series:
+    """Classic 60/40 portfolio: 60% VTI + 40% AGG, monthly rebalance.
+
+    Falls back to SPY/BND if VTI/AGG are not in the universe.
+    """
+    returns = prices.pct_change().iloc[1:]
+    # Find equity and bond tickers
+    eq_candidates = ["VTI", "SPY", "IVV", "VOO", "ITOT"]
+    bond_candidates = ["AGG", "BND", "BNDX", "IEF"]
+    eq_tick = next((t for t in eq_candidates if t in returns.columns), None)
+    bond_tick = next((t for t in bond_candidates if t in returns.columns), None)
+    if eq_tick is None or bond_tick is None:
+        raise RuntimeError(
+            f"60/40 needs at least one equity ETF {eq_candidates} and one bond ETF "
+            f"{bond_candidates} in the universe. Found: eq={eq_tick}, bond={bond_tick}"
+        )
+    rebal_dates = set(returns.groupby(pd.Grouper(freq="ME")).tail(1).index.tolist())
+    port_ret = []
+    w_eq, w_bond = 0.60, 0.40
+    for d in returns.index:
+        r_eq = returns.loc[d, eq_tick]
+        r_bond = returns.loc[d, bond_tick]
+        port_ret.append(w_eq * r_eq + w_bond * r_bond)
+        if d in rebal_dates:
+            w_eq, w_bond = 0.60, 0.40  # rebalance back to target
+        else:
+            # Drift with market
+            new_eq = w_eq * (1 + r_eq)
+            new_bond = w_bond * (1 + r_bond)
+            total = new_eq + new_bond
+            if total > 0:
+                w_eq, w_bond = new_eq / total, new_bond / total
+    return pd.Series(port_ret, index=returns.index, name="daily_return").dropna()
+
+
+def _null_spy(prices: pd.DataFrame, factors: pd.DataFrame) -> pd.Series:
+    """100% SPY buy-and-hold. The ultimate benchmark."""
+    returns = prices.pct_change().iloc[1:]
+    spy_candidates = ["SPY", "IVV", "VOO", "VTI"]
+    tick = next((t for t in spy_candidates if t in returns.columns), None)
+    if tick is None:
+        raise RuntimeError(
+            f"SPY benchmark needs at least one of {spy_candidates} in the universe"
+        )
+    return returns[tick].dropna()
+
+
 @dataclass(frozen=True)
 class StrategySpec:
     name: str
@@ -233,11 +397,17 @@ def _build_strategy_specs() -> list[StrategySpec]:
         StrategySpec("vol_targeting",
                      lambda p, f: _run_exploration(VolatilityTargeting(vol_lookback=60, target_vol=0.15), p),
                      is_null=False),
-        # Null baselines
+        # Null baselines — simple
         StrategySpec("null_equal_weight",    _null_equal_weight,    is_null=True),
         StrategySpec("null_random_uniform",  _null_random_uniform,  is_null=True),
         StrategySpec("null_inverse_vol",     _null_inverse_vol,     is_null=True),
+        # Null baselines — HRP family
         StrategySpec("null_hrp",             _null_hrp,             is_null=True),
+        StrategySpec("null_hrp_capped",      _null_hrp_capped,      is_null=True),
+        StrategySpec("null_hrp_eqfloor",     _null_hrp_equity_floor, is_null=True),
+        # Null baselines — classic benchmarks
+        StrategySpec("null_60_40",           _null_60_40,           is_null=True),
+        StrategySpec("null_spy",             _null_spy,             is_null=True),
     ]
 
 
