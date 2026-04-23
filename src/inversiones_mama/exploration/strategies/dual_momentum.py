@@ -1,21 +1,32 @@
-"""Dual Momentum (Hybrid) strategy.
+"""Dual Momentum (Antonacci) strategy.
 
 Category: Hybrid (5.5)
 
-Logic:
-  1. Rank ETFs by trailing N-day return (cross-sectional component)
-  2. Filter: only hold assets with positive absolute return (time-series filter)
-  3. If any pass → equal-weight top-K among those with positive return
-  4. If NONE pass → 100% TLT (risk-off asset)
-  5. Monthly rebalance
+Logic (fixed 2026-04-23 after forensic audit §5.1):
+  1. Compute the trailing N-day return per asset.
+  2. Apply a MARKET-WIDE absolute-momentum filter: if the median of the
+     universe's trailing returns is negative (broad bear market), go
+     risk-off (hold ``risk_off_asset`` at 100%, else stay in cash).
+  3. Otherwise (market is risk-on): equal-weight the top-K assets by
+     trailing return.
+  4. Monthly rebalance.
 
-This combines cross-sectional momentum (relative ranking) with
-absolute momentum (trend filter) — the Gary Antonacci dual momentum approach.
+This matches Gary Antonacci's original Dual Momentum formulation more
+faithfully: absolute momentum is evaluated AT THE MARKET LEVEL, not
+as a per-asset filter that's trivially redundant on wide universes.
+
+The previous implementation applied the absolute-momentum filter
+per-asset (``positive = rets[rets > 0]``) before picking top-K. On a
+1,512-ticker universe the top 3 by cross-sectional return are always
+positive, so the filter never bit -- making the strategy's signal
+identical to ``momentum_xsec``. The forensic audit measured a max
+absolute-Sharpe difference of 0.002 between the two strategies.
 
 Parameters:
   - lookback (int): trailing return window in trading days (default: 120)
   - top_k (int): max number of top performers to hold (default: 3)
-  - risk_off_asset (str): asset to hold when nothing passes (default: "TLT")
+  - risk_off_asset (str): asset to hold in bear markets (default: "TLT";
+      if not present in the universe, the strategy holds cash)
 """
 
 from __future__ import annotations
@@ -60,7 +71,7 @@ class DualMomentum(Strategy):
         prices: pd.DataFrame,
         **kwargs: Any,
     ) -> pd.DataFrame:
-        """Generate dual momentum signals."""
+        """Generate dual momentum signals with market-wide absolute filter."""
         trailing_ret = prices.pct_change(periods=self._lookback)
 
         # Monthly rebalance dates
@@ -72,20 +83,22 @@ class DualMomentum(Strategy):
         for date in prices.index:
             if date in monthly_dates:
                 rets = trailing_ret.loc[date].dropna()
-
-                # Step 1: filter for positive absolute returns only
-                positive = rets[rets > 0]
-
                 current_weights = pd.Series(0.0, index=prices.columns)
 
-                if len(positive) == 0:
-                    # Risk-off: 100% TLT (or other safe asset)
+                if len(rets) == 0:
+                    # No data -> hold cash
+                    pass
+                elif float(rets.median()) <= 0.0:
+                    # Market-wide absolute-momentum filter: the median of
+                    # trailing returns is <= 0, i.e. broad bear market.
+                    # Go risk-off: hold the configured safe asset if it
+                    # is in the universe, else stay in cash.
                     if self._risk_off in prices.columns:
                         current_weights[self._risk_off] = 1.0
                 else:
-                    # Step 2: rank by return, select top-K
-                    n_select = min(self._top_k, len(positive))
-                    top = positive.nlargest(n_select)
+                    # Risk-on: equal-weight top-K by trailing return.
+                    n_select = min(self._top_k, len(rets))
+                    top = rets.nlargest(n_select)
                     w = 1.0 / n_select
                     for ticker in top.index:
                         current_weights[ticker] = w
