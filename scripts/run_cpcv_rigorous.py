@@ -222,6 +222,46 @@ def _load_inputs(tickers: list[str], years: float = 5.0):
     return prices, factors
 
 
+def _load_from_parquet(
+    parquet_path: Path,
+    min_coverage_pct: float = 0.95,
+    min_year: int | None = None,
+):
+    """Load a pre-gathered wide prices parquet and apply a coverage filter.
+
+    ``min_year`` lets us truncate ancient rows before applying the coverage
+    filter, so the parquet's deep-history veterans don't dominate the
+    common-date window. E.g., ``min_year=2005`` applies the 95% coverage
+    test over 2005-2026, not 1990-2026.
+    """
+    from pathlib import Path as _Path  # noqa: PLC0415
+
+    path = _Path(parquet_path)
+    if not path.exists():
+        raise FileNotFoundError(f"parquet not found: {path}")
+    prices = pd.read_parquet(path)
+    if min_year is not None:
+        prices = prices.loc[prices.index.year >= int(min_year)]
+    coverage = prices.notna().sum()
+    min_cov = int(min_coverage_pct * len(prices))
+    sparse = coverage[coverage < min_cov].index.tolist()
+    if sparse:
+        prices = prices.drop(columns=sparse)
+    prices = prices.ffill().dropna(how="any")
+    if prices.empty:
+        raise RuntimeError(
+            f"After coverage filter {min_coverage_pct*100:.0f}% from {min_year}, "
+            f"zero tickers survived. Loosen the filter."
+        )
+    # Factors over the final common window
+    factors = load_factor_returns(
+        start=prices.index[0].to_pydatetime(),
+        end=prices.index[-1].to_pydatetime(),
+        use_cache=True,
+    )
+    return prices, factors
+
+
 # ============================================================================
 # Metrics and statistics
 # ============================================================================
@@ -316,11 +356,21 @@ def run_rigorous(
     n_boot: int,
     block_size: int,
     out_dir: Path,
+    prices_parquet: Path | None = None,
+    parquet_min_year: int | None = None,
+    strategies_filter: list[str] | None = None,
 ) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "figures").mkdir(parents=True, exist_ok=True)
 
     specs = _build_strategy_specs()
+    if strategies_filter:
+        wanted = set(strategies_filter)
+        specs = [s for s in specs if s.name in wanted]
+        if not specs:
+            print(f"[error] --strategies filter matched nothing: {wanted}",
+                  file=sys.stderr)
+            return 2
     real_strategies = [s for s in specs if not s.is_null]
     null_strategies = [s for s in specs if s.is_null]
     pk = PurgedKFold(n_groups=n_groups, test_groups=test_groups, embargo_pct=embargo_pct)
@@ -345,15 +395,36 @@ def run_rigorous(
     agg_rows: list[dict] = []
     daily_return_series: dict[tuple[str, str], pd.Series] = {}  # for bootstrap + plots
 
-    for universe_name in universes:
-        tickers = UNIVERSES[universe_name]()
-        print(f"\n[{universe_name}] loading {len(tickers)} tickers...", flush=True)
-        try:
-            prices, factors = _load_inputs(tickers, years=years)
-        except Exception as exc:
-            print(f"  [error] data load failed: {exc}", file=sys.stderr)
-            continue
-        print(f"[{universe_name}] prices={prices.shape}  factors={factors.shape}", flush=True)
+    # If prices_parquet is provided, override the universes loop and use it
+    # as a single universe named from its stem.
+    if prices_parquet is not None:
+        universe_iter = [("parquet:" + prices_parquet.stem, None)]
+    else:
+        universe_iter = [(u, UNIVERSES[u]()) for u in universes]
+
+    for universe_name, tickers in universe_iter:
+        if prices_parquet is not None:
+            print(f"\n[{universe_name}] loading from parquet {prices_parquet}"
+                  f"  (min_year={parquet_min_year})...", flush=True)
+            try:
+                prices, factors = _load_from_parquet(
+                    prices_parquet, min_coverage_pct=0.95,
+                    min_year=parquet_min_year,
+                )
+            except Exception as exc:
+                print(f"  [error] parquet load failed: {exc}", file=sys.stderr)
+                continue
+        else:
+            print(f"\n[{universe_name}] loading {len(tickers)} tickers...",
+                  flush=True)
+            try:
+                prices, factors = _load_inputs(tickers, years=years)
+            except Exception as exc:
+                print(f"  [error] data load failed: {exc}", file=sys.stderr)
+                continue
+        print(f"[{universe_name}] prices={prices.shape}  factors={factors.shape}  "
+              f"window={prices.index[0].date()}->{prices.index[-1].date()}",
+              flush=True)
 
         for spec in specs:
             tag = f"{universe_name}/{spec.name}"
@@ -716,6 +787,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--n-boot", type=int, default=1000)
     parser.add_argument("--block-size", type=int, default=20)
     parser.add_argument("--out-dir", type=str, default="results/cpcv_rigorous")
+    parser.add_argument("--prices-parquet", type=str, default=None,
+                        help="Pre-gathered prices parquet (skips universe fetchers "
+                             "and uses this file as a single universe).")
+    parser.add_argument("--parquet-min-year", type=int, default=None,
+                        help="Truncate rows before this year before applying the "
+                             "coverage filter on a parquet. Example: 2005.")
+    parser.add_argument("--strategies", type=str, default=None,
+                        help="Comma-separated strategy names to include "
+                             "(default: all 9). Useful to skip rck_6factor on very "
+                             "wide universes where CVXPY is prohibitively slow.")
     args = parser.parse_args(argv)
     return run_rigorous(
         universes=[u.strip() for u in args.universes.split(",") if u.strip()],
@@ -726,6 +807,10 @@ def main(argv: list[str] | None = None) -> int:
         n_boot=int(args.n_boot),
         block_size=int(args.block_size),
         out_dir=Path(args.out_dir),
+        prices_parquet=Path(args.prices_parquet) if args.prices_parquet else None,
+        parquet_min_year=args.parquet_min_year,
+        strategies_filter=([s.strip() for s in args.strategies.split(",") if s.strip()]
+                           if args.strategies else None),
     )
 
 
