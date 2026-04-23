@@ -39,12 +39,72 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from inversiones_mama.data.asset_classes import NON_EQUITY_TICKERS
+
+
+def _apply_equity_floor(
+    w: pd.Series,
+    equity_floor: float,
+    non_equity_set: frozenset[str] = NON_EQUITY_TICKERS,
+) -> pd.Series:
+    """Ensure sum of equity weights >= ``equity_floor``.
+
+    If the current equity sum is below the floor, scale equities UP and
+    non-equities DOWN so that:
+      - sum(w[is_equity])      == equity_floor
+      - sum(w[~is_equity])     == 1 - equity_floor
+
+    When either partition is empty, the scaling is a no-op. The floor
+    is applied AFTER any per-name cap; the caller is responsible for
+    re-capping if the floor re-concentrates positions past the cap
+    (unlikely on a diversified ETF universe with many equity names).
+
+    Parameters
+    ----------
+    w : pd.Series
+        Current weights (summing to ~1) indexed by ticker.
+    equity_floor : float
+        Target minimum fraction in equities, e.g. 0.40 for 40%.
+    non_equity_set : frozenset[str]
+        Classification of which tickers are non-equity. Defaults to
+        :data:`inversiones_mama.data.asset_classes.NON_EQUITY_TICKERS`.
+
+    Returns
+    -------
+    pd.Series
+        Re-scaled weights. Sum is preserved (still ~1).
+    """
+    if not (0.0 <= equity_floor <= 1.0):
+        raise ValueError(f"equity_floor must be in [0, 1], got {equity_floor}")
+    if equity_floor == 0.0:
+        return w
+
+    is_equity = ~w.index.astype(str).str.upper().isin(non_equity_set)
+    equity_w = float(w[is_equity].sum())
+    non_equity_w = float(w[~is_equity].sum())
+
+    if equity_w >= equity_floor:
+        return w  # floor already satisfied
+    if equity_w <= 0.0 or non_equity_w <= 0.0:
+        return w  # cannot rebalance if either partition is empty
+    if is_equity.sum() == 0:
+        return w  # no equities in universe
+
+    # Scale both partitions so equity sum = floor, non-equity sum = 1 - floor
+    eq_scale = equity_floor / equity_w
+    neq_scale = (1.0 - equity_floor) / non_equity_w
+    out = w.copy()
+    out[is_equity] = w[is_equity] * eq_scale
+    out[~is_equity] = w[~is_equity] * neq_scale
+    return out
+
 
 def inverse_vol_weights(
     returns: pd.DataFrame,
     vol_lookback: int = 60,
     *,
     min_vol: float = 1e-8,
+    equity_floor: float | None = None,
 ) -> pd.Series:
     """Compute inverse-volatility weights from trailing returns.
 
@@ -94,6 +154,10 @@ def inverse_vol_weights(
     total = inv_vol.sum()
     if total > 0:
         inv_vol = inv_vol / total
+
+    if equity_floor is not None and equity_floor > 0:
+        inv_vol = _apply_equity_floor(inv_vol, equity_floor)
+
     return inv_vol
 
 
@@ -103,6 +167,7 @@ def inverse_vol_allocator(
     rebal_freq: str = "ME",
     *,
     per_name_cap: float | None = None,
+    equity_floor: float | None = None,
 ) -> tuple[pd.DataFrame, pd.Series]:
     """Full inverse-vol allocation engine with periodic rebalancing.
 
@@ -138,11 +203,19 @@ def inverse_vol_allocator(
     for i, d in enumerate(returns.index):
         if d in rebal_dates and i >= vol_lookback:
             window = returns.iloc[i - vol_lookback : i]
+            # Compute raw inverse-vol first (no floor yet), then cap,
+            # then apply equity floor. This ordering matches
+            # `_null_hrp_equity_floor` in run_cpcv_rigorous.py so results
+            # are comparable.
             w = inverse_vol_weights(window, vol_lookback=vol_lookback)
 
             # Apply per-name cap if specified
             if per_name_cap is not None and per_name_cap > 0:
                 w = _apply_cap(w, per_name_cap)
+
+            # Apply equity floor AFTER the cap
+            if equity_floor is not None and equity_floor > 0:
+                w = _apply_equity_floor(w, equity_floor)
 
             current_w = w
 
@@ -179,6 +252,7 @@ def generate_current_weights(
     prices: pd.DataFrame,
     vol_lookback: int = 60,
     per_name_cap: float | None = 0.15,
+    equity_floor: float | None = 0.40,
 ) -> pd.Series:
     """One-shot: compute current inverse-vol weights for deployment.
 
@@ -205,4 +279,6 @@ def generate_current_weights(
     w = inverse_vol_weights(returns, vol_lookback=vol_lookback)
     if per_name_cap is not None:
         w = _apply_cap(w, per_name_cap)
+    if equity_floor is not None and equity_floor > 0:
+        w = _apply_equity_floor(w, equity_floor)
     return w

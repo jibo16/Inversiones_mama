@@ -8,6 +8,7 @@ import pytest
 
 from inversiones_mama.sizing.inverse_vol import (
     _apply_cap,
+    _apply_equity_floor,
     generate_current_weights,
     inverse_vol_allocator,
     inverse_vol_weights,
@@ -213,4 +214,162 @@ class TestLiquidETFIntegration:
             generate_current_weights,
             inverse_vol_allocator,
             inverse_vol_weights,
+        )
+
+
+# --- Equity-floor constraint -----------------------------------------------
+
+
+class TestEqualityFloor:
+    """Verify the 40% equity floor prevents bond/money-market degeneration."""
+
+    def _equity_non_equity_split(self, w: pd.Series) -> tuple[float, float]:
+        from inversiones_mama.data.asset_classes import NON_EQUITY_TICKERS
+        is_eq = ~w.index.astype(str).str.upper().isin(NON_EQUITY_TICKERS)
+        return float(w[is_eq].sum()), float(w[~is_eq].sum())
+
+    def test_rejects_invalid_floor(self):
+        w = pd.Series({"SPY": 0.5, "TLT": 0.5})
+        with pytest.raises(ValueError, match="equity_floor must be in"):
+            _apply_equity_floor(w, equity_floor=1.5)
+        with pytest.raises(ValueError, match="equity_floor must be in"):
+            _apply_equity_floor(w, equity_floor=-0.1)
+
+    def test_zero_floor_is_noop(self):
+        w = pd.Series({"SPY": 0.2, "TLT": 0.8})
+        out = _apply_equity_floor(w, equity_floor=0.0)
+        pd.testing.assert_series_equal(w, out)
+
+    def test_floor_already_satisfied(self):
+        """If equity_w >= floor, weights unchanged."""
+        w = pd.Series({"SPY": 0.6, "QQQ": 0.2, "TLT": 0.2})
+        out = _apply_equity_floor(w, equity_floor=0.40)
+        pd.testing.assert_series_equal(w, out)
+
+    def test_floor_lifts_equity_exposure(self):
+        """When equity_w < floor, equities get scaled up proportionally."""
+        # 91-ETF case: bonds dominate because of low vol. 10% equity, 90% bonds.
+        w = pd.Series({"SPY": 0.05, "QQQ": 0.05, "TLT": 0.60, "SHY": 0.30})
+        out = _apply_equity_floor(w, equity_floor=0.40)
+        eq, neq = self._equity_non_equity_split(out)
+        assert eq == pytest.approx(0.40, abs=1e-9)
+        assert neq == pytest.approx(0.60, abs=1e-9)
+        # SPY and QQQ should be scaled 4x each (0.10 -> 0.40)
+        assert out["SPY"] == pytest.approx(0.20, abs=1e-9)  # 0.05 * 8 = 0.40 / 2 = 0.20
+        assert out["QQQ"] == pytest.approx(0.20, abs=1e-9)
+        # TLT and SHY should be scaled 2/3x each (0.90 -> 0.60)
+        assert out["TLT"] == pytest.approx(0.60 * (0.60 / 0.90), abs=1e-9)
+        assert out["SHY"] == pytest.approx(0.30 * (0.60 / 0.90), abs=1e-9)
+        assert out.sum() == pytest.approx(1.0, abs=1e-9)
+
+    def test_floor_preserves_relative_weights_within_partition(self):
+        """Within equities, ratios are preserved. Same for non-equities."""
+        w = pd.Series({"SPY": 0.10, "QQQ": 0.05, "TLT": 0.50, "SHY": 0.35})
+        out = _apply_equity_floor(w, equity_floor=0.40)
+        # SPY:QQQ ratio preserved (2:1)
+        assert out["SPY"] / out["QQQ"] == pytest.approx(0.10 / 0.05, rel=1e-9)
+        # TLT:SHY ratio preserved
+        assert out["TLT"] / out["SHY"] == pytest.approx(0.50 / 0.35, rel=1e-9)
+
+    def test_floor_noop_when_no_equities(self):
+        """With only non-equity tickers, floor can't be applied."""
+        w = pd.Series({"TLT": 0.5, "SHY": 0.5})
+        out = _apply_equity_floor(w, equity_floor=0.40)
+        pd.testing.assert_series_equal(w, out)
+
+    def test_floor_noop_when_no_non_equities(self):
+        """With only equities, floor is already satisfied."""
+        w = pd.Series({"SPY": 0.5, "QQQ": 0.5})
+        out = _apply_equity_floor(w, equity_floor=0.40)
+        pd.testing.assert_series_equal(w, out)
+
+    def test_inverse_vol_weights_honors_floor(self):
+        """End-to-end: inverse_vol_weights with equity_floor lifts equity allocation."""
+        # Simulate a universe where bonds have very low vol (dominates inverse-vol)
+        rng = np.random.default_rng(20260423)
+        n = 252
+        # SPY ~ 1% daily vol, TLT ~ 0.5%, SHY ~ 0.05% (treasury-like)
+        spy = rng.standard_normal(n) * 0.010
+        qqq = rng.standard_normal(n) * 0.012
+        tlt = rng.standard_normal(n) * 0.005
+        shy = rng.standard_normal(n) * 0.0005  # near-zero vol -> inverse-vol blows up
+        returns = pd.DataFrame(
+            {"SPY": spy, "QQQ": qqq, "TLT": tlt, "SHY": shy},
+            index=pd.bdate_range("2025-01-02", periods=n),
+        )
+
+        # Without floor: SHY dominates because inverse-vol weight explodes
+        w_no_floor = inverse_vol_weights(returns, vol_lookback=60)
+        eq_no_floor = w_no_floor["SPY"] + w_no_floor["QQQ"]
+        assert eq_no_floor < 0.15, f"expected SHY-dominated, got equity={eq_no_floor:.3f}"
+
+        # With 40% floor: equities lifted to >= 40%
+        w_with_floor = inverse_vol_weights(returns, vol_lookback=60, equity_floor=0.40)
+        eq_with_floor = w_with_floor["SPY"] + w_with_floor["QQQ"]
+        assert eq_with_floor == pytest.approx(0.40, abs=1e-9)
+        assert w_with_floor.sum() == pytest.approx(1.0, abs=1e-9)
+
+    def test_generate_current_weights_defaults_to_40pct_floor(self):
+        """Deployment entry point defaults equity_floor=0.40."""
+        rng = np.random.default_rng(20260423)
+        n = 300
+        # Prices: 2 equities, 2 bonds. Bonds near-flat (low vol).
+        eq_prices = np.cumprod(1 + rng.standard_normal((n, 2)) * 0.01, axis=0) * 100
+        bond_prices = np.cumprod(1 + rng.standard_normal((n, 2)) * 0.001, axis=0) * 100
+        prices = pd.DataFrame(
+            np.hstack([eq_prices, bond_prices]),
+            columns=["SPY", "QQQ", "TLT", "SHY"],
+            index=pd.bdate_range("2024-01-02", periods=n),
+        )
+        # With default floor=0.40, equity share should be at least 40%
+        w = generate_current_weights(prices, vol_lookback=60)
+        eq_w = w["SPY"] + w["QQQ"]
+        assert eq_w >= 0.39, f"equity_w={eq_w:.3f} below default 40% floor"
+        assert w.sum() == pytest.approx(1.0, abs=1e-9)
+
+    def test_generate_current_weights_floor_none_disables(self):
+        """equity_floor=None disables the floor (back to raw inverse-vol + cap)."""
+        rng = np.random.default_rng(20260423)
+        n = 300
+        eq_prices = np.cumprod(1 + rng.standard_normal((n, 2)) * 0.01, axis=0) * 100
+        bond_prices = np.cumprod(1 + rng.standard_normal((n, 2)) * 0.001, axis=0) * 100
+        prices = pd.DataFrame(
+            np.hstack([eq_prices, bond_prices]),
+            columns=["SPY", "QQQ", "TLT", "SHY"],
+            index=pd.bdate_range("2024-01-02", periods=n),
+        )
+        # With floor=None, bonds should dominate (near-zero vol)
+        w = generate_current_weights(prices, vol_lookback=60, equity_floor=None,
+                                      per_name_cap=None)
+        eq_w = w["SPY"] + w["QQQ"]
+        assert eq_w < 0.20, f"expected bond-dominated, got equity={eq_w:.3f}"
+        assert w.sum() == pytest.approx(1.0, abs=1e-9)
+
+    def test_allocator_floor_stable_across_rebalances(self):
+        """Every rebalance enforces the floor."""
+        rng = np.random.default_rng(20260423)
+        n = 400
+        eq = np.cumprod(1 + rng.standard_normal((n, 2)) * 0.01, axis=0) * 100
+        bonds = np.cumprod(1 + rng.standard_normal((n, 2)) * 0.001, axis=0) * 100
+        prices = pd.DataFrame(
+            np.hstack([eq, bonds]),
+            columns=["SPY", "QQQ", "TLT", "SHY"],
+            index=pd.bdate_range("2024-01-02", periods=n),
+        )
+        from inversiones_mama.data.asset_classes import NON_EQUITY_TICKERS
+
+        weights_df, _ = inverse_vol_allocator(
+            prices, vol_lookback=60, rebal_freq="ME", equity_floor=0.40,
+        )
+        # Check every rebalance date's equity share
+        monthly_idx = prices.resample("ME").last().index
+        sampled = weights_df.loc[weights_df.index.isin(monthly_idx)]
+        # Drop any leading rows where current_w is still equal-weight (pre-first-rebalance)
+        sampled = sampled.iloc[2:]  # skip first couple months (warmup)
+        is_eq = ~sampled.columns.astype(str).str.upper().isin(NON_EQUITY_TICKERS)
+        equity_sum = sampled.loc[:, is_eq].sum(axis=1)
+        # After warmup, equity share should be >= 0.39 (allow tiny drift)
+        assert (equity_sum >= 0.39).mean() > 0.9, (
+            f"expected >=90% of rebalances to respect floor, got "
+            f"{(equity_sum >= 0.39).mean():.2%}"
         )
