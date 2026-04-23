@@ -169,6 +169,43 @@ def _null_inverse_vol(prices: pd.DataFrame, factors: pd.DataFrame) -> pd.Series:
     return pd.Series(port_ret, index=returns.index, name="daily_return").dropna()
 
 
+def _null_hrp(prices: pd.DataFrame, factors: pd.DataFrame) -> pd.Series:
+    """Hierarchical Risk Parity (Lopez de Prado 2016).
+
+    Monthly rebalance; trailing 252 trading-day returns feed the
+    correlation-distance -> clustering -> recursive-bisection pipeline.
+    No expected-return signal used, so classified as a null baseline --
+    but a sophisticated one (correlation-aware, variance-aware).
+    """
+    from inversiones_mama.sizing.hrp import hrp_weights  # noqa: PLC0415
+
+    returns = prices.pct_change().iloc[1:]
+    rebal_dates = set(returns.groupby(pd.Grouper(freq="ME")).tail(1).index.tolist())
+    weights = pd.DataFrame(0.0, index=returns.index, columns=returns.columns)
+    current_w = pd.Series(1.0 / returns.shape[1], index=returns.columns)
+    lookback = 252
+    for i, d in enumerate(returns.index):
+        if d in rebal_dates and i >= lookback:
+            window = returns.iloc[i - lookback:i]
+            # Keep only assets with full coverage + non-zero variance in the
+            # window. Others are dropped for this rebalance; re-added next.
+            active = window.dropna(axis=1, how="any")
+            var = active.var()
+            active = active[var[var > 0].index]
+            if active.shape[1] >= 2:
+                try:
+                    w = hrp_weights(active)
+                    current_w = w.reindex(weights.columns).fillna(0.0)
+                    total = current_w.sum()
+                    if total > 0:
+                        current_w = current_w / total
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  [hrp-warn] {d.date()}: {exc}")
+        weights.loc[d] = current_w.values
+    port_ret = (weights.values * returns.values).sum(axis=1)
+    return pd.Series(port_ret, index=returns.index, name="daily_return").dropna()
+
+
 @dataclass(frozen=True)
 class StrategySpec:
     name: str
@@ -200,6 +237,7 @@ def _build_strategy_specs() -> list[StrategySpec]:
         StrategySpec("null_equal_weight",    _null_equal_weight,    is_null=True),
         StrategySpec("null_random_uniform",  _null_random_uniform,  is_null=True),
         StrategySpec("null_inverse_vol",     _null_inverse_vol,     is_null=True),
+        StrategySpec("null_hrp",             _null_hrp,             is_null=True),
     ]
 
 
