@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -286,3 +287,87 @@ def test_orchestrator_exempt_pdt_tracker_never_blocks(synthetic_market):
     summary = orch.rebalance(pdt_tracker=pdt)
     assert summary.halt_reason is None
     assert summary.order_count >= 1
+
+
+# --------------------------------------------------------------------------- #
+# weight_fn plugin tests                                                      #
+# --------------------------------------------------------------------------- #
+
+
+def test_orchestrator_with_custom_weight_fn(synthetic_market):
+    """Verify that a custom weight_fn overrides the default RCK path."""
+    prices, factors = synthetic_market
+    c = DryRunClient(starting_cash=5000.0)
+    for t in prices.columns:
+        c.set_latest_price(t, float(prices[t].iloc[-1]))
+
+    # Custom weight_fn that allocates 100% to the first ticker
+    first_ticker = prices.columns[0]
+
+    def equal_weight_fn(p, f):
+        w = pd.Series(0.0, index=p.columns)
+        w[first_ticker] = 1.0
+        return w
+
+    orch = PaperTradingOrchestrator(
+        c, prices, factors,
+        weight_fn=equal_weight_fn,
+        lookback_days=252,
+    )
+    summary = orch.rebalance()
+    assert summary.target_weights[first_ticker] == pytest.approx(1.0, abs=1e-9)
+    assert summary.order_count >= 1
+
+
+def test_orchestrator_weight_fn_none_defaults_to_rck(synthetic_market):
+    """weight_fn=None should use the default RCK path (existing behavior)."""
+    prices, factors = synthetic_market
+    c = DryRunClient(starting_cash=5000.0)
+    for t in prices.columns:
+        c.set_latest_price(t, float(prices[t].iloc[-1]))
+
+    orch = PaperTradingOrchestrator(
+        c, prices, factors,
+        weight_fn=None,  # explicit None = RCK
+        lookback_days=252,
+    )
+    summary = orch.rebalance()
+    # Should succeed (same as existing test_orchestrator_runs_one_rebalance)
+    assert isinstance(summary, PaperRebalanceSummary)
+    assert summary.order_count >= 1
+
+
+def test_orchestrator_weight_fn_reindexes_missing_tickers(synthetic_market):
+    """weight_fn returning a subset of tickers gets reindexed (missing → 0)."""
+    prices, factors = synthetic_market
+    c = DryRunClient(starting_cash=5000.0)
+    for t in prices.columns:
+        c.set_latest_price(t, float(prices[t].iloc[-1]))
+
+    subset = prices.columns[:2]
+
+    def partial_fn(p, f):
+        return pd.Series(0.5, index=subset)
+
+    orch = PaperTradingOrchestrator(
+        c, prices, factors,
+        weight_fn=partial_fn,
+        lookback_days=252,
+    )
+    summary = orch.rebalance()
+    # Tickers not in the weight_fn output should get 0 weight
+    for t in prices.columns[2:]:
+        assert summary.target_weights[t] == pytest.approx(0.0, abs=1e-9)
+    # Tickers in the weight_fn output should keep their weights
+    for t in subset:
+        assert summary.target_weights[t] == pytest.approx(0.5, abs=1e-9)
+
+
+def test_cli_allocator_invvol_eqfloor_smoke():
+    """Smoke-test: verify _make_invvol_eqfloor_fn produces a callable."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from run_paper_rebalance import _make_invvol_eqfloor_fn
+    fn = _make_invvol_eqfloor_fn()
+    assert callable(fn)
+

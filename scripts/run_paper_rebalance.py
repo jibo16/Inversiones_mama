@@ -1,4 +1,15 @@
-"""Run one paper-trading rebalance cycle of the v1a strategy.
+"""Run one paper-trading rebalance cycle.
+
+Supports multiple allocation strategies via ``--allocator``:
+
+* ``rck`` (default)            — 6-factor Risk-Constrained Kelly.
+* ``vol_targeting``            — Volatility-targeting inverse-vol (60d, 15% target vol).
+* ``invvol_eqfloor``           — Inverse-vol with 15% per-name cap + 40% equity floor.
+
+Supports multiple universes via ``--universe``:
+
+* ``v1a`` (default)            — 10 ETFs from config.UNIVERSE.
+* ``etfs``                     — 91 liquid ETFs from LIQUID_ETFS.
 
 Supports three brokers via the ``--broker`` flag:
 
@@ -25,9 +36,9 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pandas as pd
 from dotenv import load_dotenv
 
-from inversiones_mama.config import UNIVERSE
 from inversiones_mama.data.factors import load_factor_returns
 from inversiones_mama.data.prices import load_prices
 from inversiones_mama.execution.circuit_breaker import CircuitBreaker
@@ -37,6 +48,41 @@ from inversiones_mama.execution.paper_trader import (
     PaperTradingOrchestrator,
 )
 from inversiones_mama.execution.pdt import PDTTracker
+
+
+# --------------------------------------------------------------------------- #
+# Allocator weight functions                                                  #
+# --------------------------------------------------------------------------- #
+
+
+def _make_vol_targeting_fn():
+    """Return a weight_fn for VolatilityTargeting (60d lookback, 15% target vol)."""
+    from inversiones_mama.exploration.strategies.vol_targeting import VolatilityTargeting
+
+    strategy = VolatilityTargeting(vol_lookback=60, target_vol=0.15)
+
+    def weight_fn(prices: pd.DataFrame, factors: pd.DataFrame) -> pd.Series:
+        weights_df = strategy.generate_signals(prices)
+        if weights_df.empty:
+            return pd.Series(0.0, index=prices.columns)
+        return weights_df.iloc[-1]
+
+    return weight_fn
+
+
+def _make_invvol_eqfloor_fn():
+    """Return a weight_fn for inverse-vol with 15% cap + 40% equity floor."""
+    from inversiones_mama.sizing.inverse_vol import generate_current_weights
+
+    def weight_fn(prices: pd.DataFrame, factors: pd.DataFrame) -> pd.Series:
+        return generate_current_weights(
+            prices,
+            vol_lookback=60,
+            per_name_cap=0.15,
+            equity_floor=0.40,
+        )
+
+    return weight_fn
 
 
 def _build_dryrun_client(cash: float, prices_df) -> DryRunClient:
@@ -79,6 +125,19 @@ def _build_ibkr_client() -> ExecutionClient:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--allocator",
+                        choices=["rck", "vol_targeting", "invvol_eqfloor"],
+                        default="rck",
+                        help="Allocation strategy: rck (6-factor Kelly), "
+                             "vol_targeting (60d/15%% target), "
+                             "invvol_eqfloor (inv-vol + 15%% cap + 40%% eq floor). "
+                             "Default: rck.")
+    parser.add_argument("--universe",
+                        choices=["v1a", "etfs"],
+                        default="v1a",
+                        help="Asset universe: v1a (10 ETFs), etfs (91 liquid ETFs). "
+                             "Default: v1a. vol_targeting and invvol_eqfloor work "
+                             "best on etfs.")
     parser.add_argument("--broker", choices=["dry", "alpaca", "ibkr"], default="dry",
                         help="Broker client (default: dry; simulated fills).")
     parser.add_argument("--cash", type=float, default=5_000.0,
@@ -88,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
                              "(e.g. 5000 when running on a $100k Alpaca paper account).")
     parser.add_argument("--breaker-threshold", type=float, default=None,
                         help="If set, trip the circuit breaker at this drawdown "
-                             "(positive fraction, e.g. 0.30 for 30%).")
+                             "(positive fraction, e.g. 0.30 for 30%%).")
     parser.add_argument("--pdt-equity", type=float, default=None,
                         help="Account equity for PDT tracker. If unset, uses broker's cash balance.")
     parser.add_argument("--log", type=str, default="results/paper_trades.json",
@@ -104,11 +163,28 @@ def main(argv: list[str] | None = None) -> int:
     if env_path.exists():
         load_dotenv(env_path)
 
-    tickers = list(UNIVERSE.keys())
+    # Resolve universe
+    if args.universe == "etfs":
+        from inversiones_mama.data.liquid_universe import LIQUID_ETFS
+        tickers = sorted(set(LIQUID_ETFS))
+        universe_label = f"LIQUID_ETFS ({len(tickers)} tickers)"
+    else:
+        from inversiones_mama.config import UNIVERSE
+        tickers = list(UNIVERSE.keys())
+        universe_label = f"v1a ({len(tickers)} tickers)"
+
+    # Resolve allocator
+    weight_fn = None
+    if args.allocator == "vol_targeting":
+        weight_fn = _make_vol_targeting_fn()
+    elif args.allocator == "invvol_eqfloor":
+        weight_fn = _make_invvol_eqfloor_fn()
+    # else: rck (default, weight_fn=None triggers RCK path)
+
     end = datetime.today() - timedelta(days=1)
     start = end - timedelta(days=int(args.years * 365) + 14)
 
-    print(f"[1/4] Loading prices for {len(tickers)} tickers: {start.date()} -> {end.date()}...")
+    print(f"[1/4] Loading prices for {universe_label}: {start.date()} -> {end.date()}...")
     prices = load_prices(tickers, start, end, use_cache=True)
     print(f"       shape: {prices.shape}")
 
@@ -137,9 +213,10 @@ def main(argv: list[str] | None = None) -> int:
     pdt = PDTTracker(account_equity=pdt_equity)
     print(f"       PDT tracker: equity=${pdt_equity:,.0f} exempt={pdt.exempt}")
 
-    print(f"[4/4] Running one rebalance cycle (max_capital={args.max_capital})...")
+    print(f"[4/4] Running one rebalance cycle (allocator={args.allocator}, max_capital={args.max_capital})...")
     orch = PaperTradingOrchestrator(
         client, prices, factors,
+        weight_fn=weight_fn,
         max_deploy_capital=args.max_capital,
     )
     summary = orch.rebalance(

@@ -1,6 +1,6 @@
-"""Paper-trading orchestrator for v1a deployment validation.
+"""Paper-trading orchestrator for deployment validation.
 
-One rebalance cycle of the 6-factor + Risk-Constrained Kelly strategy:
+One rebalance cycle of a configurable allocation strategy:
 
   1. Pull current positions + cash from the ``ExecutionClient``.
   2. Pull latest prices and factor returns.
@@ -35,7 +35,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
 
 import numpy as np
 import pandas as pd
@@ -215,6 +215,7 @@ class PaperTradingOrchestrator:
         prices_history: pd.DataFrame,
         factors_history: pd.DataFrame,
         *,
+        weight_fn: Callable[[pd.DataFrame, pd.DataFrame], pd.Series] | None = None,
         lookback_days: int = LOOKBACK_DAYS,
         kelly_fraction: float = KELLY_FRACTION,
         per_name_cap: float = MAX_WEIGHT_PER_NAME,
@@ -235,6 +236,7 @@ class PaperTradingOrchestrator:
             )
 
         self.client = client
+        self._weight_fn = weight_fn
         self.prices_history = prices_history
         self.factors_history = factors_history
         self.lookback_days = int(lookback_days)
@@ -267,6 +269,19 @@ class PaperTradingOrchestrator:
         )
 
     def _compute_target_weights(self) -> pd.Series:
+        """Compute target weights using the configured strategy.
+
+        If ``weight_fn`` was provided at construction, delegates to it.
+        Otherwise falls back to the default 6-factor + RCK solver.
+        """
+        if self._weight_fn is not None:
+            w = self._weight_fn(self.prices_history, self.factors_history)
+            tickers = list(self.prices_history.columns)
+            return w.reindex(tickers).fillna(0.0)
+
+        return self._compute_rck_weights()
+
+    def _compute_rck_weights(self) -> pd.Series:
         """Fit 6-factor + RCK on the trailing lookback and return target weights."""
         tickers = list(self.prices_history.columns)
         returns = self.prices_history.pct_change().dropna(how="all")
