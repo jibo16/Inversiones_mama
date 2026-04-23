@@ -78,7 +78,7 @@ class ExecutionClient(Protocol):
     to know.
     """
 
-    def get_positions(self) -> dict[str, int]:
+    def get_positions(self) -> dict[str, int | float]:
         """Current positions — mapping ticker -> signed share count."""
         ...
 
@@ -114,11 +114,13 @@ class DryRunClient:
         latest_prices: dict[str, float] | None = None,
     ) -> None:
         self._cash: float = float(starting_cash)
-        self._positions: dict[str, int] = {}
+        # int or float — fractional shares supported for parity with the
+        # fractional-share path in the real Alpaca client.
+        self._positions: dict[str, int | float] = {}
         self._prices: dict[str, float] = dict(latest_prices or {})
 
     # --- Introspection ---------------------------------------------------
-    def get_positions(self) -> dict[str, int]:
+    def get_positions(self) -> dict[str, int | float]:
         return {k: v for k, v in self._positions.items() if v != 0}
 
     def get_cash(self) -> float:
@@ -158,17 +160,25 @@ class DryRunClient:
                 broker_order_id=None,
                 context={"reason": "insufficient_cash", "needed": trade_value, "cash": self._cash},
             )
-        # Apply the trade
-        self._positions[intent.ticker] = self._positions.get(intent.ticker, 0) + intent.shares
-        if self._positions[intent.ticker] == 0:
-            self._positions.pop(intent.ticker)
-        self._cash -= intent.shares * px  # buy reduces cash, sell increases
+        # Apply the trade. Preserve fractional qty if the intent used it.
+        qty_raw = float(intent.shares)
+        qty_is_frac = qty_raw != int(qty_raw)
+        new_pos = float(self._positions.get(intent.ticker, 0)) + qty_raw
+        if abs(new_pos) < 1e-9:
+            self._positions.pop(intent.ticker, None)
+        else:
+            self._positions[intent.ticker] = (
+                new_pos if qty_is_frac or isinstance(self._positions.get(intent.ticker), float)
+                else int(round(new_pos))
+            )
+        self._cash -= qty_raw * px  # buy reduces cash, sell increases
         now_fill = datetime.now(tz=timezone.utc)
+        filled_quantity = qty_raw if qty_is_frac else int(qty_raw)
         return FillRecord(
             order_time=now_order,
             fill_time=now_fill,
             fill_price=px,
-            filled_quantity=int(intent.shares),
+            filled_quantity=filled_quantity,
             status="filled",
             broker_order_id=str(uuid.uuid4()),
         )
@@ -225,6 +235,9 @@ class PaperTradingOrchestrator:
         per_sector_cap: float = MAX_WEIGHT_PER_SECTOR,
         sector_map: dict[str, str] | None = None,
         max_deploy_capital: float | None = None,
+        fractional_shares: bool = False,
+        min_order_notional: float = 1.0,
+        strategy_id: str | None = None,
     ) -> None:
         if prices_history.empty:
             raise ValueError("prices_history must be non-empty")
@@ -267,6 +280,18 @@ class PaperTradingOrchestrator:
         self.max_deploy_capital = (
             float(max_deploy_capital) if max_deploy_capital is not None else None
         )
+        # Fractional-share support. When True, target weights that imply
+        # sub-1-share deltas are submitted as fractional qty instead of
+        # rounded to 0. Critical for small deployment capital on high-priced
+        # equity ETFs (e.g., SPY at $711 with a 0.9% target weight on $5k
+        # = $45 budget -> 0.063 shares, which would round to 0 without this).
+        self.fractional_shares = bool(fractional_shares)
+        # Skip any order whose notional value is below this (dust orders).
+        self.min_order_notional = float(min_order_notional)
+        # Optional tag attached to the signal_context of every order, so
+        # multi-strategy ledger consumers can attribute fills back to a
+        # specific strategy bag.
+        self.strategy_id = str(strategy_id) if strategy_id else None
 
     def _compute_target_weights(self) -> pd.Series:
         """Compute target weights using the configured strategy.
@@ -365,6 +390,14 @@ class PaperTradingOrchestrator:
             deployable = min(portfolio_value, self.max_deploy_capital)
         else:
             deployable = portfolio_value
+        # Fractional-share buffer: a single-ticker strategy at 100% target
+        # weight can compute delta_shares so that qty*px exceeds available
+        # cash by a few cents due to floating-point rounding. Leave a 0.5%
+        # cushion in that case so the broker can't reject on insufficient
+        # cash. For whole-share orders the int(round(...)) path already
+        # truncates, so no buffer needed.
+        if self.fractional_shares:
+            deployable = deployable * 0.995
 
         # --- Circuit-breaker gate ---
         breaker_dd: float | None = None
@@ -421,10 +454,12 @@ class PaperTradingOrchestrator:
             log.warning("Cost estimator failed: %s", exc)
             estimated_cost = 0.0
 
-        # Build orders: integer shares based on weight deltas at current prices.
-        # `deployable` is the cap — target weights are applied to it, not to the
-        # full portfolio_value (so Alpaca's $100k default cash doesn't force us
-        # to deploy more than the strategy's intended capital).
+        # Build orders: share deltas from weight deltas at current prices.
+        # `deployable` caps target notional (target weights applied to
+        # min(portfolio_value, max_deploy_capital) so Alpaca's $100k default
+        # doesn't force us to deploy more than the strategy's intended slice).
+        # Fractional shares (self.fractional_shares=True) preserve the equity
+        # floor on small deployment capital with high-priced ETFs.
         trade_log = TradeLog()
         total_fill_value = 0.0
         n_orders = 0
@@ -436,9 +471,19 @@ class PaperTradingOrchestrator:
             target_dollar = float(target_w[t]) * deployable
             current_dollar = current_positions.get(t, 0) * px
             delta_dollar = target_dollar - current_dollar
-            delta_shares = int(round(delta_dollar / px))
-            if delta_shares == 0:
-                continue
+
+            if self.fractional_shares:
+                # Preserve full target granularity. Round to 6 decimals to
+                # avoid floating-point noise in the order body.
+                delta_shares: float = round(delta_dollar / px, 6)
+                if abs(delta_shares * px) < self.min_order_notional:
+                    # Dust order; skip.
+                    continue
+            else:
+                # Legacy integer-share behavior for backward compat.
+                delta_shares = int(round(delta_dollar / px))
+                if delta_shares == 0:
+                    continue
 
             # --- PDT gate ---
             # A rebalance order becomes a "day trade" only if it closes a same-day
@@ -449,18 +494,21 @@ class PaperTradingOrchestrator:
                 merged_log = _merge_logs(prior_trade_log, trade_log)
                 if not pdt_tracker.can_execute_new_day_trade(merged_log, as_of=now.date()):
                     log.warning(
-                        "PDT gate blocked order: ticker=%s delta_shares=%d, "
+                        "PDT gate blocked order: ticker=%s delta_shares=%.4f, "
                         "window day-trade count exhausted.", t, delta_shares,
                     )
                     pdt_skipped += 1
                     continue
 
+            sig_ctx = dict(signal_context or {})
+            if self.strategy_id is not None:
+                sig_ctx["strategy_id"] = self.strategy_id
             signal = SignalRecord(
                 ticker=t,
                 signal_time=now,
                 expected_price=px,
                 expected_size=delta_shares,
-                context=signal_context or {},
+                context=sig_ctx,
             )
             intent = OrderIntent(ticker=t, shares=delta_shares, order_type="MKT")
             fill = self.client.submit_order(intent)

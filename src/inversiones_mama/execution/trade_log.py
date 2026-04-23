@@ -69,7 +69,8 @@ class FillRecord:
     order_time: datetime
     fill_time: datetime | None
     fill_price: float | None
-    filled_quantity: int
+    # int for whole-share orders, float for fractional (Alpaca)
+    filled_quantity: int | float
     status: str
     broker_order_id: str | None = None
     context: dict[str, Any] = field(default_factory=dict)

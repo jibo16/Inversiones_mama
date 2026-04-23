@@ -187,25 +187,55 @@ class AlpacaClient:
         return None
 
     def submit_order(self, intent: OrderIntent) -> FillRecord:
-        """Submit an Alpaca order matching the OrderIntent and poll for fill."""
+        """Submit an Alpaca order matching the OrderIntent and poll for fill.
+
+        Supports fractional shares: if ``intent.shares`` is a non-integer
+        float, the ``qty`` is passed to Alpaca as a decimal string
+        (e.g., "0.125") and Alpaca automatically routes as a fractional
+        order. Fractional orders require TIF=DAY and are market-only per
+        Alpaca's docs.
+        """
         order_time = datetime.now(tz=timezone.utc)
-        side = "buy" if intent.shares > 0 else "sell"
-        qty = abs(int(intent.shares))
-        if qty == 0:
+        raw_shares = float(intent.shares)
+        side = "buy" if raw_shares > 0 else "sell"
+        qty_abs = abs(raw_shares)
+        if qty_abs <= 0:
             return FillRecord(
                 order_time=order_time, fill_time=None, fill_price=None,
                 filled_quantity=0, status="rejected",
                 context={"reason": "zero_shares"},
             )
 
+        # Fractional detection: float qty that isn't whole => send as decimal.
+        is_fractional = (qty_abs != int(qty_abs))
+        if is_fractional:
+            qty_str = f"{qty_abs:.6f}".rstrip("0").rstrip(".")
+            if not qty_str or qty_str == "0":
+                return FillRecord(
+                    order_time=order_time, fill_time=None, fill_price=None,
+                    filled_quantity=0, status="rejected",
+                    context={"reason": "qty_rounds_to_zero"},
+                )
+        else:
+            qty_str = str(int(qty_abs))
+
         # Map our broker-agnostic OrderIntent.order_type (IBKR convention:
         # "MKT", "LMT") to Alpaca's vocabulary ("market", "limit", etc.)
         order_type_raw = intent.order_type.upper()
         alpaca_type = _ORDER_TYPE_MAP.get(order_type_raw, order_type_raw.lower())
+        # Alpaca fractional orders require TIF=day and type=market.
         alpaca_tif = _TIF_MAP.get(intent.tif.upper(), intent.tif.lower())
+        if is_fractional:
+            if alpaca_type != "market":
+                return FillRecord(
+                    order_time=order_time, fill_time=None, fill_price=None,
+                    filled_quantity=0, status="rejected",
+                    context={"reason": "fractional_requires_market_order"},
+                )
+            alpaca_tif = "day"  # force DAY for fractional regardless of input
         body: dict[str, object] = {
             "symbol": intent.ticker.upper(),
-            "qty": str(qty),
+            "qty": qty_str,
             "side": side,
             "type": alpaca_type,
             "time_in_force": alpaca_tif,
@@ -238,9 +268,12 @@ class AlpacaClient:
             )
 
         # Poll for fill
-        return self._poll_for_fill(str(order_id), order_time, qty)
+        return self._poll_for_fill(str(order_id), order_time, qty_abs)
 
-    def _poll_for_fill(self, order_id: str, order_time: datetime, expected_qty: int) -> FillRecord:
+    def _poll_for_fill(
+        self, order_id: str, order_time: datetime,
+        expected_qty: int | float,
+    ) -> FillRecord:
         deadline = time.monotonic() + self.config.poll_max_wait_seconds
         last_status = "submitted"
         while time.monotonic() < deadline:
@@ -252,7 +285,10 @@ class AlpacaClient:
             last_status = str(o.get("status", "submitted")).lower()
             if last_status == "filled":
                 fill_price = _to_float(o.get("filled_avg_price"))
-                filled_qty = int(_to_float(o.get("filled_qty")) or 0)
+                # Preserve fractional qty when Alpaca fills a fractional order.
+                filled_qty_raw = _to_float(o.get("filled_qty")) or 0.0
+                filled_qty = (int(filled_qty_raw) if filled_qty_raw == int(filled_qty_raw)
+                              else float(filled_qty_raw))
                 return FillRecord(
                     order_time=order_time,
                     fill_time=_parse_iso(o.get("filled_at")) or datetime.now(tz=timezone.utc),
